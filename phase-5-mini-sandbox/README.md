@@ -1,10 +1,10 @@
 # Phase 5 项目：mini-sandbox（Capstone ⭐）
 
-**目标**：单机沙盒任务平台，对标 JD 全部 5 条职责，可写进简历。建议用 Go 实现（Python 做过原型后重写）。
+**目标**：单机沙盒任务平台，覆盖岗位 5 大能力，可写进简历。建议用 Go 实现（Python 做过原型后重写）。
 
 ## 模块
 
-| JD 职责 | 模块 |
+| 岗位能力 | 模块 |
 |---|---|
 | 大规模沙盒平台 | 并发任务池 |
 | VM/容器统一接入 | `Runtime` 抽象：`ContainerRuntime(runc)` + `MicroVMRuntime(firecracker)`，统一 `create/start/stop/destroy` 接口 |
@@ -16,7 +16,7 @@
 
 1. 一条命令起任务（如 `minisandbox run --runtime firecracker --template python-task`）
 2. 任务失败后 `replay` 能复现
-3. README 有架构图 + 对标 JD 的 5 条映射表
+3. README 有架构图 + 5 大能力映射表
 
 ## 里程碑
 
