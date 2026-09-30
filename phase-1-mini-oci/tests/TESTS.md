@@ -1,6 +1,6 @@
 # Phase 1 测试用例
 
-在 Linux VM 里执行，当前目录为 `phase-1-mini-oci/`。以下用例在 mini-oci 实现完成后执行。每条用例：操作 → 预期结果，通过才算实验做对。
+在 Linux VM 或 Mac 上执行，当前目录为 `phase-1-mini-oci/`。以下用例在 mini-oci 实现完成后执行。T1-1/T1-2 可在 Mac 或 VM 执行；T1-3 的 `run` 需要 runc，必须在 Linux VM 执行；T1-4/T1-5 在 VM 执行。每条用例：操作 → 预期结果，通过才算实验做对。
 
 | 编号 | 操作 | 预期结果 |
 |---|---|---|

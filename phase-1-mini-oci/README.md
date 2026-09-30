@@ -19,7 +19,10 @@ phase-1-mini-oci/
         └── bundle/           # unpack 产物：rootfs + config.json
 ```
 
-**规矩**：`impl/` 只放源码；所有手写或程序生成的实验文件一律进 `work/`。`work/` 已在根目录 `.gitignore` 里，不会进仓库。
+**规矩**：
+- `impl/` 只放源码；所有手写或程序生成的实验文件一律进 `work/`。
+- `work/` 是你的草稿纸，**clone 下来是空的**——跟着文档里的 `mkdir` 命令自己建出来，不用从任何地方"获取"。
+- `work/` 已在根目录 `.gitignore` 里，不会进仓库；它跟着机器走（Mac 上的 `work/` 不会自动跑到 VM 里）。
 
 ## 这一章要回答的问题
 
@@ -52,6 +55,8 @@ registry ──pull──▶ OCI layout ──unpack──▶ bundle ──runc�
 
 ## Session 1-1｜OCI 三件套：只看结构，不读全文（30 分钟）
 
+**在哪做**：任意（浏览器看文档）
+
 **目标**：说出 image-spec / runtime-spec / distribution-spec 各管什么，能默写出上面的链。
 
 **背景**：OCI 是容器界的"普通话"。2015 年 Docker 把容器格式捐出来成立 OCI，从此 runc 跑的 bundle、containerd 拉的镜像都讲同一种格式。不需要读 spec 全文，知道"谁管哪段"就行。
@@ -71,63 +76,25 @@ registry ──pull──▶ OCI layout ──unpack──▶ bundle ──runc�
 
 ## Session 1-2｜手写一个最小 OCI 镜像（40 分钟）
 
-**目标**：不用 `docker build`，亲手造出一个能被 runc/Docker 认出来的镜像。
+**在哪做**：Mac 本机（就是"造文件"，不需要 VM）
 
-**背景**：OCI layout 就是个目录，结构固定：
+**目标**：不用 `docker build`，亲手造出一个能被 Docker 认出来的镜像。
+
+**背景**：OCI layout 就是个目录，结构固定。关键点只有一个：**manifest 和 config 不是顶层文件，它们是 blobs**——文件名就是其内容的 sha256（内容寻址）；顶层只有 `oci-layout` 和 `index.json` 两个"路牌"：
 
 ```
 work/myimage/
-├── oci-layout          # {"imageLayoutVersion": "1.0.0"}
-├── index.json          # 入口：指向 manifest
+├── oci-layout          # {"imageLayoutVersion": "1.0.0"}，固定写法
+├── index.json          # 入口路牌：指向 manifest blob 的 digest
 └── blobs/sha256/
-    ├── <manifest 的 sha256>
-    ├── <config 的 sha256>
-    └── <layer 的 sha256>   # 文件名就是 digest，内容寻址
+    ├── <manifest 的 sha256>   # JSON：指 config + layers
+    ├── <config 的 sha256>     # JSON：架构、Entrypoint、diff_ids
+    └── <layer 的 sha256>      # tar 包：真正的文件
 ```
 
-`index.json` 骨架：
+三个 JSON 的关系是一条引用链：`index.json` → manifest →（config + layers），每一环都靠 digest 寻址。
 
-```json
-{
-  "schemaVersion": 2,
-  "mediaType": "application/vnd.oci.image.index.v1+json",
-  "manifests": [{
-    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-    "digest": "sha256:<...>",
-    "size": 1234
-  }]
-}
-```
-
-manifest 骨架：
-
-```json
-{
-  "schemaVersion": 2,
-  "mediaType": "application/vnd.oci.image.manifest.v1+json",
-  "config": {
-    "mediaType": "application/vnd.oci.image.config.v1+json",
-    "digest": "sha256:<...>", "size": 123
-  },
-  "layers": [{
-    "mediaType": "application/vnd.oci.image.layer.v1.tar",
-    "digest": "sha256:<...>", "size": 456
-  }]
-}
-```
-
-config 骨架（注意 `diff_ids` 是**未压缩** layer tar 的 digest）：
-
-```json
-{
-  "architecture": "arm64",
-  "os": "linux",
-  "rootfs": {"type": "layers", "diff_ids": ["sha256:<...>"]},
-  "config": {"Entrypoint": ["/hello"]}
-}
-```
-
-**动手**（Go）：
+**动手**（Mac，`phase-1-mini-oci/` 目录下）：
 1. 准备一个静态编译的 `hello`（`go build` 一个打印 hello 的程序）。**建议**让它支持 `wait` 参数（收到就阻塞不退出），Session 1-3 要用它演示 `running` 状态：
 
    ```go
@@ -135,7 +102,7 @@ config 骨架（注意 `diff_ids` 是**未压缩** layer tar 的 digest）：
        select {} // 阻塞，模拟常驻进程
    }
    ```
-2. 用 Go 打 layer tar 并算 digest（在 `phase-1-mini-oci/` 目录下执行；核心就这几行）：
+2. 用 Go 打 layer tar 并算 digest（核心就这几行；存成 `mk-layer.go` 后 `go run mk-layer.go`）：
 
 ```go
 package main
@@ -162,10 +129,86 @@ func main() {
 }
 ```
 
-预期输出：`sha256:4f2c…  size=10240`（一串 hex + 字节数）。
+   预期输出：`sha256:4f2c…  size=10240`（一串 hex + 字节数）。
 
-3. 在 `work/myimage/` 下按上面的骨架手写 `config.json`、`manifest.json`、`index.json`、`oci-layout`，把 blobs 按 digest 放进 `work/myimage/blobs/sha256/`。
-4. 验证（在 `phase-1-mini-oci/` 目录下执行）：
+   > `mk-layer.go` 放哪？`phase-1-mini-oci/` 根下随手放就行（或 `/tmp`），它是草稿，不进 `impl/`，用完删掉。
+
+3. 按"内容寻址"的顺序生成 blobs——**每一步产出的 digest 都是下一步的输入**，这就是内容寻址：
+
+   ```bash
+   mkdir -p work/myimage/blobs/sha256
+   cd work/myimage   # 后面几步都在这执行，做完记得 cd 回去
+   ```
+
+   a. 存 layer blob（文件名 = digest）：
+   ```bash
+   LAYER_DIGEST=$(shasum -a 256 ../layer.tar | awk '{print $1}')
+   cp ../layer.tar blobs/sha256/$LAYER_DIGEST
+   ```
+
+   b. 写 config blob（注意 `diff_ids` 填的是 layer 的 digest）：
+   ```bash
+   cat > blobs/sha256/config.json <<EOF
+   {
+     "architecture": "arm64",
+     "os": "linux",
+     "rootfs": {"type": "layers", "diff_ids": ["sha256:$LAYER_DIGEST"]},
+     "config": {"Entrypoint": ["/hello"]}
+   }
+   EOF
+   CONFIG_DIGEST=$(shasum -a 256 blobs/sha256/config.json | awk '{print $1}')
+   CONFIG_SIZE=$(wc -c < blobs/sha256/config.json | tr -d ' ')
+   mv blobs/sha256/config.json blobs/sha256/$CONFIG_DIGEST
+   ```
+
+   c. 写 manifest blob：
+   ```bash
+   cat > blobs/sha256/manifest.json <<EOF
+   {
+     "schemaVersion": 2,
+     "mediaType": "application/vnd.oci.image.manifest.v1+json",
+     "config": {
+       "mediaType": "application/vnd.oci.image.config.v1+json",
+       "digest": "sha256:$CONFIG_DIGEST",
+       "size": $CONFIG_SIZE
+     },
+     "layers": [{
+       "mediaType": "application/vnd.oci.image.layer.v1.tar",
+       "digest": "sha256:$LAYER_DIGEST",
+       "size": $(wc -c < ../layer.tar | tr -d ' ')
+     }]
+   }
+   EOF
+   MANIFEST_DIGEST=$(shasum -a 256 blobs/sha256/manifest.json | awk '{print $1}')
+   MANIFEST_SIZE=$(wc -c < blobs/sha256/manifest.json | tr -d ' ')
+   mv blobs/sha256/manifest.json blobs/sha256/$MANIFEST_DIGEST
+   ```
+
+   d. 写顶层两个"路牌"：
+   ```bash
+   cat > index.json <<EOF
+   {
+     "schemaVersion": 2,
+     "mediaType": "application/vnd.oci.image.index.v1+json",
+     "manifests": [{
+       "mediaType": "application/vnd.oci.image.manifest.v1+json",
+       "digest": "sha256:$MANIFEST_DIGEST",
+       "size": $MANIFEST_SIZE
+     }]
+   }
+   EOF
+   echo '{"imageLayoutVersion": "1.0.0"}' > oci-layout
+   cd ../..   # 回到 phase-1-mini-oci/
+   ```
+
+   e. 检查最终结构：
+   ```bash
+   find work/myimage -type f
+   ```
+
+   预期输出：5 个文件——`oci-layout`、`index.json`、`blobs/sha256/<64 位 hex>` × 3。
+
+4. 验证：
    ```bash
    skopeo copy oci:work/myimage docker-daemon:myimage:1.0
    docker run --rm myimage:1.0
@@ -176,15 +219,19 @@ func main() {
 **验证**：`docker images` 里出现 `myimage:1.0`（对应测试 T1-1/T1-2）。
 
 **常见坑**：
-- `architecture` 写错（ARM VM 里是 `arm64`，不是 `amd64`）→ Docker 报平台不匹配。
+- `shasum` 是 macOS 自带的；Linux 上对应命令是 `sha256sum`。本节在 Mac 做。
+- `architecture` 写错（M4 Mac 上是 `arm64`，不是 `amd64`）→ Docker 报平台不匹配。注意：`go build` 在 M4 Mac 上默认打出 arm64 二进制，和这里一致。
 - blob 文件名必须 exactly 是 hex digest（不带 `sha256:` 前缀），`size` 必须和实际字节数一致，差 1 个字节都认不出来。
 - `diff_ids` 是未压缩 tar 的 digest；本节用纯 tar（`+tar` 不是 `+tar+gzip`），两者一致，少个坑。
 
-**下一步**：→ Session 1-3（拿这个镜像的 rootfs 去喂 runc）
+**下一步**：→ Session 1-3（拿这个镜像的 rootfs 去喂 runc；那节要进 VM）
+
 
 ---
 
 ## Session 1-3｜runc：亲手跑一个 bundle（30 分钟）
+
+**在哪做**：Linux VM（要 root + runc）
 
 **目标**：理解"OCI runtime bundle = rootfs + config.json"，会用 runc 起停容器。
 
@@ -233,6 +280,8 @@ func main() {
 
 ## Session 1-4｜containerd + ctr（35 分钟）
 
+**在哪做**：Linux VM
+
 **目标**：会用 `ctr` 拉镜像、跑容器、切 namespace；理解 containerd 是 runc 的"经纪人"。
 
 **背景**：containerd 负责镜像管理、容器生命周期、快照、事件，对外暴露 gRPC API。`ctr` 是它自带的调试 CLI（难用但直接）。docker CLI 背后调的也是 containerd（经由 dockerd）。
@@ -267,6 +316,8 @@ func main() {
 ---
 
 ## Session 1-5｜BuildKit：看懂镜像是怎么「构建」出来的（35 分钟）
+
+**在哪做**：Mac（有 Docker 就行）
 
 **目标**：理解 LLB（构建图）和缓存；说出 BuildKit 相对 `docker build` 多解决了什么。
 
@@ -311,6 +362,7 @@ go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需
 - 所有输出一律写进 `work/output/`，不污染 `impl/`。
 - 镜像名映射：`busybox:latest` → `work/output/images/busybox`（去掉 `library/` 前缀和 tag）。
 - `run` 需要 root 建 namespace：先 `go build -o work/mini-oci ./impl`，再 `sudo work/mini-oci run busybox:latest`（sudo 不改变当前目录，相对路径照常工作）。
+- `run` 需要 runc（Linux only）：`pull`/`unpack` 在 Mac 就能做，`run` 那步去 VM 里做（work/ 跟着机器走，把 `work/output` 拷过去，或在 VM 里重跑一次 pull/unpack 也行）。
 
 **建议实现顺序**（每步都可独立验证）：
 1. `pull`：先调通 registry HTTP API（见下），能把 blobs 下到本地就算成。
