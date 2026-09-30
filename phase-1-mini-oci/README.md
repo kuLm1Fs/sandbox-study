@@ -1,6 +1,11 @@
-# Phase 1 项目：mini-oci（Python）
+# Phase 1 项目：mini-oci（Go）
 
-**目标**：写一个 Python 小工具，打通「拉镜像 → 解包 → 生成 OCI bundle → runc 运行」全链路。
+**目标**：写一个 Go 小工具，打通「拉镜像 → 解包 → 生成 OCI bundle → runc 运行」全链路。
+
+## 目录结构
+
+- `impl/`：Go 实现（`go.mod` + 源码），`pull` / `unpack` / `run` 三个子命令
+- `tests/`：测试用例（`TESTS.md`），每个用例含操作步骤和预期结果
 
 ## 功能
 
@@ -10,7 +15,7 @@
 
 ## 验收
 
-`python mini_oci.py run busybox:latest` 能跑起来。
+`go run ./impl run busybox:latest` 能跑起来。
 
 ## 进度
 

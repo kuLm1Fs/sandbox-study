@@ -2,6 +2,11 @@
 
 **目标**：单节点 k3s/kind + 两个 RuntimeClass（runc 默认 + runsc），验证多 runtime 共存。
 
+## 目录结构
+
+- `impl/`：集群配置清单（RuntimeClass / Deployment YAML）
+- `tests/`：测试用例（`TESTS.md`）
+
 ## 内容
 
 - RuntimeClass 配置（`handler: runsc`）

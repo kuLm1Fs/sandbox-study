@@ -27,5 +27,5 @@
 ## 环境
 
 - 主力机：Mac（M3/M4）；实验机：Lima 起的 ARM64 Linux VM（嵌套虚拟化开 `/dev/kvm`）
-- Linux VM 里：Docker、Python 3.10+、git、curl、Go；Mac 本机：Lima
+- Linux VM 里：Docker、Go 1.22+、git、curl；Mac 本机：Lima
 - 详见 [docs/学习路线.md](docs/学习路线.md) 第三节「环境准备」

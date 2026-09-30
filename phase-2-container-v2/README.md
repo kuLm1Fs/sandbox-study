@@ -1,6 +1,11 @@
-# Phase 2 项目：自制容器 v2.0
+# Phase 2 项目：自制容器 v2.0（Go）
 
-**目标**：在 Phase 0 的 container-from-scratch 基础上加三层隔离。
+**目标**：在 Phase 0 的 container-from-scratch 基础上加三层隔离（建议用 Go 重写或封装）。
+
+## 目录结构
+
+- `impl/`：Go 实现（`go.mod` + 源码）
+- `tests/`：测试用例（`TESTS.md`），含 cgroup / seccomp / 网络的验证步骤
 
 ## 要加的三层
 
