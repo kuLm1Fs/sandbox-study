@@ -3,6 +3,24 @@
 > 预计 2–3 周 ｜ 前置：Phase 0 入口自测通过（见 `docs/入口自测.md`）｜ 环境：Linux VM（runc、containerd、skopeo）+ Mac（Go 1.22+）
 > 产出：Go 写的 mini-oci（`impl/`）+ 本章测试全部通过（`tests/TESTS.md`）
 
+## 目录分工
+
+```
+phase-1-mini-oci/
+├── README.md   # 本章学习计划（你正在看的）
+├── impl/       # mini-oci 的 Go 源码：只放 .go 文件，保持干净
+├── tests/      # 测试用例（tests/TESTS.md）
+└── work/       # 你的草稿纸（git 忽略，不会提交）：
+    ├── myimage/        # Session 1-2 手写的 OCI layout
+    ├── bundle/         # Session 1-3 手工搭的 runc bundle
+    ├── layer.tar       # Session 1-2 打出的 layer
+    └── output/         # mini-oci 程序的输出
+        ├── images/busybox/   # pull 产物：OCI layout
+        └── bundle/           # unpack 产物：rootfs + config.json
+```
+
+**规矩**：`impl/` 只放源码；所有手写或程序生成的实验文件一律进 `work/`。`work/` 已在根目录 `.gitignore` 里，不会进仓库。
+
 ## 这一章要回答的问题
 
 学完这一章，应该能不假思索地回答：
@@ -58,7 +76,7 @@ registry ──pull──▶ OCI layout ──unpack──▶ bundle ──runc�
 **背景**：OCI layout 就是个目录，结构固定：
 
 ```
-myimage/
+work/myimage/
 ├── oci-layout          # {"imageLayoutVersion": "1.0.0"}
 ├── index.json          # 入口：指向 manifest
 └── blobs/sha256/
@@ -110,8 +128,14 @@ config 骨架（注意 `diff_ids` 是**未压缩** layer tar 的 digest）：
 ```
 
 **动手**（Go）：
-1. 准备一个静态编译的 `hello`（`go build` 一个打印 hello 的程序，或用 busybox）。
-2. 用 Go 打 layer tar 并算 digest（核心就这几行）：
+1. 准备一个静态编译的 `hello`（`go build` 一个打印 hello 的程序）。**建议**让它支持 `wait` 参数（收到就阻塞不退出），Session 1-3 要用它演示 `running` 状态：
+
+   ```go
+   if len(os.Args) > 1 && os.Args[1] == "wait" {
+       select {} // 阻塞，模拟常驻进程
+   }
+   ```
+2. 用 Go 打 layer tar 并算 digest（在 `phase-1-mini-oci/` 目录下执行；核心就这几行）：
 
 ```go
 package main
@@ -124,7 +148,7 @@ import (
 )
 
 func main() {
-	f, _ := os.Create("/tmp/layer.tar")
+	f, _ := os.Create("work/layer.tar")
 	tw := tar.NewWriter(f)
 	data, _ := os.ReadFile("hello")
 	tw.WriteHeader(&tar.Header{Name: "hello", Mode: 0o755, Size: int64(len(data))})
@@ -132,7 +156,7 @@ func main() {
 	tw.Close()
 	f.Close()
 
-	raw, _ := os.ReadFile("/tmp/layer.tar")
+	raw, _ := os.ReadFile("work/layer.tar")
 	sum := sha256.Sum256(raw)
 	fmt.Printf("sha256:%x  size=%d\n", sum, len(raw))
 }
@@ -140,10 +164,10 @@ func main() {
 
 预期输出：`sha256:4f2c…  size=10240`（一串 hex + 字节数）。
 
-3. 按上面的骨架手写 `config.json`、`manifest.json`、`index.json`、`oci-layout`，把 blobs 按 digest 放进 `blobs/sha256/`。
-4. 验证：
+3. 在 `work/myimage/` 下按上面的骨架手写 `config.json`、`manifest.json`、`index.json`、`oci-layout`，把 blobs 按 digest 放进 `work/myimage/blobs/sha256/`。
+4. 验证（在 `phase-1-mini-oci/` 目录下执行）：
    ```bash
-   skopeo copy oci:/path/to/myimage docker-daemon:myimage:1.0
+   skopeo copy oci:work/myimage docker-daemon:myimage:1.0
    docker run --rm myimage:1.0
    ```
 
@@ -167,11 +191,11 @@ func main() {
 **背景**：runc 是 OCI runtime 的参考实现，职责单一：读 `config.json`，按里面的 namespace/cgroup/rootfs 配置 `clone()` 出一个进程。它不管镜像、不管网络——那些是 containerd 的活。
 
 **动手**（VM 里，需要 root）：
-1. 准备 bundle：
+1. 准备 bundle（在 `phase-1-mini-oci/` 目录下执行）：
    ```bash
-   mkdir -p bundle/rootfs && cd bundle
-   tar -xf /tmp/layer.tar -C rootfs   # 用 Session 1-2 的 layer
-   runc spec                          # 生成默认 config.json
+   mkdir -p work/bundle/rootfs && cd work/bundle
+   tar -xf ../layer.tar -C rootfs   # 用 Session 1-2 打出的 layer
+   runc spec                        # 生成默认 config.json
    ```
 2. 改 `config.json`：`process.args` → `["/hello"]`，确认 `root.path` 是 `"rootfs"`。
 3. 跑起来：
@@ -180,16 +204,16 @@ func main() {
    ```
 
    预期输出：你的 hello 打印出来，容器退出。
-4. 看状态：
+4. 看"运行中"状态：把 `config.json` 的 `process.args` 改成 `["/hello", "wait"]`（需要你的 hello 支持 `wait` 参数，见 Session 1-2 注），然后：
    ```bash
-   sudo runc run -d demo2 -- /bin/sh -c 'sleep 100'
+   sudo runc run -d demo2
    sudo runc list
    ```
 
    预期输出：
    ```
-   ID      PID     STATUS    BUNDLE        CREATED                       OWNER
-   demo2   12345   running   /path/bundle  2026-10-01T01:00:00.000000Z   root
+   ID      PID     STATUS    BUNDLE           CREATED                          OWNER
+   demo2   12345   running   .../work/bundle  2026-10-01T01:00:00.000000000Z   root
    ```
    ```bash
    sudo runc kill demo2 KILL
@@ -277,10 +301,16 @@ docker run --rm --privileged -v $PWD:/tmp/work --entrypoint buildctl-daemonless.
 把 Session 1-2 的手工作业写成真正的工具。接口：
 
 ```bash
-go run ./impl pull busybox:latest ./images/busybox   # 拉 manifest + layers，存 OCI layout
-go run ./impl unpack ./images/busybox ./bundle       # 解包成 rootfs + 生成 bundle config.json
-go run ./impl run busybox:latest                     # pull + unpack + runc run 一条龙
+# 以下都在 phase-1-mini-oci/ 目录下执行
+go run ./impl pull busybox:latest     # 拉 manifest + layers → work/output/images/busybox（OCI layout）
+go run ./impl unpack busybox:latest   # work/output/images/busybox → work/output/bundle（rootfs + config.json）
+go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需 root，见下）
 ```
+
+**实现约定**（写代码时遵守，测试按此验收）：
+- 所有输出一律写进 `work/output/`，不污染 `impl/`。
+- 镜像名映射：`busybox:latest` → `work/output/images/busybox`（去掉 `library/` 前缀和 tag）。
+- `run` 需要 root 建 namespace：先 `go build -o work/mini-oci ./impl`，再 `sudo work/mini-oci run busybox:latest`（sudo 不改变当前目录，相对路径照常工作）。
 
 **建议实现顺序**（每步都可独立验证）：
 1. `pull`：先调通 registry HTTP API（见下），能把 blobs 下到本地就算成。
@@ -308,6 +338,7 @@ go run ./impl run busybox:latest                     # pull + unpack + runc run 
 **验收**（对应 `tests/TESTS.md` T1-1 ~ T1-3）：
 - `go run ./impl run busybox:latest` 能跑起来
 - `go vet ./...` 无报错
+- `git status` 干净：`work/` 下的东西没有混进仓库
 
 ---
 
