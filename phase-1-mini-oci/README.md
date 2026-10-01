@@ -1,6 +1,6 @@
 # Phase 1：容器运行时进阶（Go）
 
-> 预计 2–3 周 ｜ 前置：Phase 0 入口自测通过（见 `docs/入口自测.md`）｜ 环境：Linux VM（runc、containerd、skopeo）+ Mac（Go 1.22+）
+> 预计 2–3 周 ｜ 前置：Phase 0 入口自测通过（见 `docs/入口自测.md`）｜ 环境：Linux VM（runc、containerd）+ Mac（Go 1.22+、Docker、skopeo）
 > 产出：Go 写的 mini-oci（`impl/`）+ 本章测试全部通过（`tests/TESTS.md`）
 
 ## 目录分工
@@ -239,7 +239,7 @@ func main() {
 
    预期输出：5 个文件——`oci-layout`、`index.json`、`blobs/sha256/<64 位 hex>` × 3。
 
-4. 验证：
+4. 验证（没装 skopeo 先 `brew install skopeo`）：
    ```bash
    skopeo copy oci:work/myimage docker-daemon:myimage:1.0
    docker run --rm myimage:1.0
