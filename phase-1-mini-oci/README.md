@@ -53,24 +53,55 @@ registry ──pull──▶ OCI layout ──unpack──▶ bundle ──runc�
 
 ---
 
-## Session 1-1｜OCI 三件套：只看结构，不读全文（30 分钟）
+## Session 1-1｜三个 spec，一人一句话（25 分钟）
 
-**在哪做**：任意（浏览器看文档）
+**在哪做**：Mac（有 Docker 就行）
 
-**目标**：说出 image-spec / runtime-spec / distribution-spec 各管什么，能默写出上面的链。
+**目标**：看到 `docker run` 时，能说出三个 spec 各管哪一段。
 
-**背景**：OCI 是容器界的"普通话"。2015 年 Docker 把容器格式捐出来成立 OCI，从此 runc 跑的 bundle、containerd 拉的镜像都讲同一种格式。不需要读 spec 全文，知道"谁管哪段"就行。
+**背景**（只看这段，不用查任何文档）：
+把一次 `docker run` 想成"点外卖"：
+- **distribution-spec** = 外卖平台的配送流程：怎么从商家（registry）把餐送到你手上 → 对应 `docker pull`
+- **image-spec** = 餐盒的打包标准：盒子里有几层、每层是什么、标签怎么写 → 对应镜像的 manifest/config/layers
+- **runtime-spec** = 餐桌礼仪：餐盒打开后怎么摆、从哪道菜先吃 → 对应 runc 怎么把 bundle 变成一个运行的进程
 
-**动手**：
-1. 打开 [OCI image-spec README](https://github.com/opencontainers/image-spec/blob/HEAD/README.md)，只看目录结构，找到 `manifest.md`、`config.md`、`layout.md` 三个文件名——它们就是三件套。
-2. 打开 [OCI runtime-spec README](https://github.com/opencontainers/runtime-spec/blob/HEAD/README.md)，找到 `config.md`（bundle 长什么样）。
-3. 在纸上默写一遍全景图，不看上面。
+记住三个字：**拉 → 包 → 跑**。
 
-**验证**：合上页面，用一句话向自己解释"镜像 → bundle → 容器"这条链。说不出来就再看一遍图，最多 5 分钟。
+**动手**（三条命令，每条对应一个 spec）：
+1. distribution-spec 管"怎么拉"：
+   ```bash
+   docker pull busybox:latest
+   ```
 
-**最小 session**：只做第 1 步 + 默写全景图。
+   看输出：一层层 `Pull complete` —— 这就是 distribution-spec 定义的"传输过程"。
+2. image-spec 管"包长什么样"：
+   ```bash
+   docker image inspect busybox --format='{{.Architecture}} {{.Os}}'
+   ```
+
+   预期输出：`arm64 linux`。这就是 image-spec 里 config 规定的字段——镜像是个"有清单的包裹"。
+3. runtime-spec 管"怎么跑"：
+   ```bash
+   docker create --name t1 busybox
+   docker ps -a --filter name=t1
+   ```
+
+   预期输出：t1 的 STATUS 是 `Created`——容器已经"摆好"了（bundle 就绪），但还没"开吃"（进程没起）。runc 管的就是"从摆好到开吃"这一步。
+   ```bash
+   docker rm t1   # 收拾干净
+   ```
+
+**验证**：合上文档，填这句话——
+
+> `docker pull` 走的是 ______-spec；镜像里"有几层、每层是啥"由 ______-spec 定；runc 按 ______-spec 把 bundle 变成进程。
+
+答案：distribution / image / runtime。全对就过。
+
+**最小 session**：只做第 1 条命令 + 记住"拉→包→跑"三个字。
 
 **下一步**：→ Session 1-2（亲手造一个镜像，验证你理解的 layout 对不对）
+
+> spec 原文链接收进"延伸"了：当字典查，不当课文啃。卡住了才去翻。
 
 ---
 
@@ -400,6 +431,7 @@ go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需
 
 ## 延伸（可选，不阻塞）
 
+- spec 原文（当字典查，不当课文啃）：[image-spec](https://github.com/opencontainers/image-spec) / [runtime-spec](https://github.com/opencontainers/runtime-spec) / [distribution-spec](https://github.com/opencontainers/distribution-spec)
 - `ctr -n k8s.io containers list`：看 k8s 在 containerd 里留下的容器
 - [containerd 入门实操](https://github.com/mukappalambda/go-examples/blob/HEAD/container/containerd/getting-started.md)
 - [BuildKit rootless 文档](https://github.com/moby/buildkit/blob/HEAD/docs/rootless.md)（只看感兴趣的部分）
