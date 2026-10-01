@@ -133,7 +133,7 @@ work/myimage/
        select {} // 阻塞，模拟常驻进程
    }
    ```
-2. 用 Go 打 layer tar 并算 digest（核心就这几行；存成 `mk-layer.go` 后 `go run mk-layer.go`）：
+2. 用 Go 打 layer tar 并算 digest（在 `phase-1-mini-oci/` 目录下执行；先 `mkdir -p work`，再把下面存成 `mk-layer.go`，然后 `go run mk-layer.go`）：
 
 ```go
 package main
@@ -254,6 +254,7 @@ func main() {
 - `architecture` 写错（M4 Mac 上是 `arm64`，不是 `amd64`）→ Docker 报平台不匹配。注意：`go build` 在 M4 Mac 上默认打出 arm64 二进制，和这里一致。
 - blob 文件名必须 exactly 是 hex digest（不带 `sha256:` 前缀），`size` 必须和实际字节数一致，差 1 个字节都认不出来。
 - `diff_ids` 是未压缩 tar 的 digest；本节用纯 tar（`+tar` 不是 `+tar+gzip`），两者一致，少个坑。
+- `go run mk-layer.go` 报 `expected 'package', found 'EOF'` → 文件是空的（内容没写进去），`head mk-layer.go` 检查下；文件名也要和命令里的一致。
 
 **下一步**：→ Session 1-3（拿这个镜像的 rootfs 去喂 runc；那节要进 VM）
 
