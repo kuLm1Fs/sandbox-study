@@ -412,11 +412,40 @@ docker run --rm myimage:1.0                   # hello from OCI
 
 **背景**：runc 是 OCI runtime 的参考实现，职责单一：读 `config.json`，按里面的 namespace/cgroup/rootfs 配置 `clone()` 出一个进程。它不管镜像、不管网络——那些是 containerd 的活。
 
-**动手**（VM 里，需要 root）：
-1. 准备 bundle（在 `phase-1-mini-oci/` 目录下执行）：
+**动手前（三分钟，把路铺平）**：
+1. 起 VM（Mac 上执行，一次就行）：
    ```bash
-   mkdir -p work/bundle/rootfs && cd work/bundle
-   tar -xf ../layer.tar -C rootfs   # 用 Session 1-2 打出的 layer
+   brew install lima   # 没装过 lima 才要
+   limactl start --name=sandbox template://ubuntu --nested-virt
+   ```
+
+   之后每次进 VM（Mac 上执行）：
+   ```bash
+   limactl shell --start sandbox
+   ```
+
+   预期：直接进到 VM 的 shell（没起会自动起）。
+2. VM 里装 runc：
+   ```bash
+   sudo apt update && sudo apt install -y runc
+   runc --version
+   ```
+
+   预期输出：`runc version 1.x.x`（x 是几无所谓，能打印就行）。
+3. 把 Mac 上的 layer.tar 送进 VM（**Mac 上执行**，在 `phase-1-mini-oci/` 目录下——VM 里不会自动有 Mac 的 work/）：
+   ```bash
+   limactl copy work/layer.tar sandbox:/tmp/layer.tar
+   ```
+
+   回 VM 里接住它：
+   ```bash
+   mkdir -p ~/p1/work/bundle/rootfs && cp /tmp/layer.tar ~/p1/work/layer.tar && cd ~/p1/work/bundle
+   ```
+
+**动手**（VM 里，需要 root）：
+1. 准备 bundle（接"动手前"第 3 步，当前目录就是 `~/p1/work/bundle`，后面几步都在这执行；VM 里不需要 clone 仓库，Session 1-3 是独立实验）：
+   ```bash
+   tar -xf ../layer.tar -C rootfs   # 用 Mac 传过来的 layer
    runc spec                        # 生成默认 config.json
    ```
 2. 改 `config.json`：`process.args` → `["/hello"]`，确认 `root.path` 是 `"rootfs"`。
@@ -453,6 +482,8 @@ docker run --rm myimage:1.0                   # hello from OCI
   - 修法②：给 `--console-socket /path/to/sock`，把控制台交给别人托管 —— **containerd / `ctr run -t` 就是这么干的**。
   - 同一问题的另一面：`docker run` 不带 `-i -t` 时，`Cmd` 是 `sh` 也拿不到 stdin，**读到 EOF 立刻退出**（看起来像「什么都没发生」，退出码还是 0）。
 - **`sudo runc delete demo` 报 `container does not exist`**：**不是错**。`runc run`（不加 `-d`）是「创建 + 启动 + **退出后自动清理**」，前台跑完容器已经不存在了。只有 `runc create`、或 `runc run -d` 留下的容器才需要 `delete`。
+- `limactl copy` 提示 instance 不存在 → VM 还没建或名字不对：`limactl list` 看实际名字，对上再拷。
+- `tar -xf ../layer.tar` 报找不到文件 → "动手前"第 3 步的 `cp` 没做或目录错了，`ls ~/p1/work/layer.tar` 确认。
 
 **下一步**：→ Session 1-4（runc 上面那层：containerd）
 
