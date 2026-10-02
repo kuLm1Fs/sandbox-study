@@ -72,7 +72,21 @@ func writeBlob(dir string, rd io.Reader, d descriptor) error {
 	return os.Rename(tmp.Name(), final)
 }
 
+// writeRemoteBlob 从 registry 拉一个 blob 并落盘
+//
+// 如果本地已经有这个名字和 blob 就直接跳过了 --- 而且**不需要任何校验**：
+// 名字就是内容的 sha256，而writeBlob 保证了 "文件以正式名字出现"就等价于"内容正确"。
+// 内容寻址最实用的红利就在这里：缓存判断只值一次 os.Stat。
 func writeRemoteBlob(r *registry, dir string, d descriptor) error {
+	p, err := blobPath(dir, d.Digest)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(p); err == nil {
+		fmt.Printf("	%s 已在本地，跳过下载\n", d.Digest)
+		return nil
+	}
+
 	body, err := r.fetchBlob(d.Digest)
 	if err != nil {
 		return err
