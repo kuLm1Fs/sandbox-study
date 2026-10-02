@@ -126,12 +126,41 @@ work/myimage/
 三个 JSON 的关系是一条引用链：`index.json` → manifest →（config + layers），每一环都靠 digest 寻址。
 
 **动手**（Mac，`phase-1-mini-oci/` 目录下）：
-1. 准备一个静态编译的 `hello`（`go build` 一个打印 hello 的程序）。**建议**让它支持 `wait` 参数（收到就阻塞不退出），Session 1-3 要用它演示 `running` 状态：
+1. 准备一个静态编译的 `hello`。**建议**让它支持 `wait` 参数（收到就阻塞不退出），Session 1-3 要用它演示 `running` 状态。
+
+   ```bash
+   mkdir -p /tmp/hello && cd /tmp/hello
+   go mod init hello     # go build 需要模块上下文；漏了会报 go.mod file not found
+   ```
 
    ```go
-   if len(os.Args) > 1 && os.Args[1] == "wait" {
-       select {} // 阻塞，模拟常驻进程
+   // /tmp/hello/main.go
+   package main
+
+   import (
+   	"fmt"
+   	"os"
+   	"os/signal"
+   	"syscall"
+   )
+
+   func main() {
+   	if len(os.Args) > 1 && os.Args[1] == "wait" {
+   		// 别用 select{} —— 它会触发 Go 的 deadlock 检测，见「常见坑」
+   		ch := make(chan os.Signal, 1)
+   		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+   		<-ch
+   		return
+   	}
+   	fmt.Println("hello from OCI")
    }
+   ```
+   ```bash
+   # 交叉编译成静态 arm64 二进制，产物直接落到 repo 根
+   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+     go build -o ~/code/sandbox-study/phase-1-mini-oci/hello .
+   file ~/code/sandbox-study/phase-1-mini-oci/hello
+   # 期望：ELF 64-bit LSB executable, ARM aarch64, statically linked
    ```
 2. 用 Go 打 layer tar 并算 digest（在 `phase-1-mini-oci/` 目录下执行；先 `mkdir -p work`，再把下面存成 `mk-layer.go`，然后 `go run mk-layer.go`）：
 
@@ -142,25 +171,48 @@ import (
 	"archive/tar"
 	"crypto/sha256"
 	"fmt"
+	"log"
 	"os"
 )
 
 func main() {
-	f, _ := os.Create("work/layer.tar")
+	f, err := os.Create("work/layer.tar")
+	if err != nil {
+		log.Fatal(err)
+	}
 	tw := tar.NewWriter(f)
-	data, _ := os.ReadFile("hello")
-	tw.WriteHeader(&tar.Header{Name: "hello", Mode: 0o755, Size: int64(len(data))})
-	tw.Write(data)
+
+	// error 必须接住：丢掉它就会静默打出一个空 layer，见「常见坑」
+	data, err := os.ReadFile("hello")
+	if err != nil {
+		log.Fatal("读不到 hello，先 go build：", err)
+	}
+	if len(data) == 0 {
+		log.Fatal("hello 是 0 字节，先 go build")
+	}
+
+	if err := tw.WriteHeader(&tar.Header{Name: "hello", Mode: 0o755, Size: int64(len(data))}); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		log.Fatal(err)
+	}
 	tw.Close()
 	f.Close()
 
-	raw, _ := os.ReadFile("work/layer.tar")
+	raw, err := os.ReadFile("work/layer.tar")
+	if err != nil {
+		log.Fatal(err)
+	}
 	sum := sha256.Sum256(raw)
 	fmt.Printf("sha256:%x  size=%d\n", sum, len(raw))
 }
 ```
 
-   预期输出：`sha256:4f2c…  size=10240`（一串 hex + 字节数）。
+   预期输出：`sha256:4f2c…  size=2406912`（一串 hex + 字节数）。
+
+   > `size` 就是 layer 的字节数，取决于你的 `hello` 多大。Go 静态二进制约 2.4 MB，所以是这个量级。
+   > **如果你看到 `size=1536` 或更小的数，说明 `hello` 是空的**（`os.ReadFile` 读失败被静默吞了），见「常见坑」。
 
    > `mk-layer.go` 放哪？`phase-1-mini-oci/` 根下随手放就行（或 `/tmp`），它是草稿，不进 `impl/`，用完删掉。
 
@@ -241,20 +293,103 @@ func main() {
 
 4. 验证（没装 skopeo 先 `brew install skopeo`）：
    ```bash
-   skopeo copy oci:work/myimage docker-daemon:myimage:1.0
+   # Colima / Docker Desktop 的 socket 不在 /var/run/docker.sock，
+   # 而 skopeo 不读 docker context，必须显式指定，见「常见坑」
+   skopeo copy \
+     --dest-daemon-host "unix://$HOME/.colima/default/docker.sock" \
+     oci:work/myimage docker-daemon:myimage:1.0
+
    docker run --rm myimage:1.0
    ```
 
-   预期输出：看到你的 `hello` 打印出来；`docker images` 里出现 `myimage:1.0`。
+   预期输出：`hello from OCI`；`docker images` 里出现 `myimage:1.0`。
+
+   常驻模式（Session 1-3 要用的姿势）：
+   ```bash
+   docker run -d --name oci-wait myimage:1.0 wait
+   docker ps --filter name=oci-wait        # → Up
+   docker stop oci-wait                    # SIGTERM → ExitCode=0
+   docker rm oci-wait
+   ```
 
 **验证**：`docker images` 里出现 `myimage:1.0`（对应测试 T1-1/T1-2）。
 
-**常见坑**：
+**常见坑**（按"你会看到的报错"组织；每一条都是真踩过的）：
+
+**环境 / 路径类**
+
+- **zsh 卡住不动，没有任何报错**：`cat > file <<EOF` 的收尾 `EOF` **必须顶格**（第 0 列）。前面有一个空格它就不算终结符，zsh 会把后面所有行——包括后面的命令——全当正文吞掉，然后永远等下去。注意 `<<-` 只剥前导 **tab**，不剥空格，所以空格缩进的 `<<-EOF` 照样卡。
+  - 救出来：`Ctrl-C`；或手动敲一个顶格的 `EOF` 回车。
+  - 卡住时**命令根本没执行**，别以为文件已经写好了。
+  - 一劳永逸：别用 heredoc，改用 `printf '%s\n' 'line1' 'line2' > file`，或者直接用编辑器写。
+- **`Invalid source name oci:work/my-image: lstat .../work/work: no such file or directory`**：`oci:` 后面的路径是**相对当前目录**的，不是相对仓库根。
+
+  | 你的 cwd | 正确写法 |
+  |---|---|
+  | `phase-1-mini-oci/` | `oci:work/myimage` |
+  | `phase-1-mini-oci/work/` | `oci:myimage` |
+
+  （报错里出现重复的路径段，比如 `work/work`，就是这条。）
+- **`failed to connect to the docker API at unix:///var/run/docker.sock`**：Colima / Docker Desktop 的 socket 不在那儿。关键点是 **skopeo 不读 docker context**（`docker context ls` 里那个地址它看不见），而且 **`DOCKER_HOST` 环境变量也不管用**，必须用专用 flag：
+  ```bash
+  skopeo copy --dest-daemon-host "unix://$HOME/.colima/default/docker.sock" \
+    oci:work/myimage docker-daemon:myimage:1.0
+  ```
+  （`docker-daemon:` 当**源**时同理，用 `--src-daemon-host`。）
+- **`writing blob: io: read/write on closed pipe`**：这条**不是**独立错误，是上一条的**下游症状**——skopeo 一边往管道灌 tar，一边 daemon 连不上把管道关了，于是报这个。**看到 closed pipe，先往上翻找 `failed to connect`**，别去查 layer 格式。
+
+**静默错误类（最坑：没有报错，但结果是错的）**
+
+- **`os.ReadFile` 的 error 被丢掉 → 打出空 layer**：`hello` 不存在时它返回空 slice，`mk-layer.go` 于是打出一个**0 字节的 `hello`**。整个 OCI 结构完全合法、`skopeo inspect` 也照收，直到 `docker run` 才炸：
+  ```
+  exec /hello: exec format error
+  ```
+  - **症状识别**：`go run mk-layer.go` 输出 `size=1536`（或任何远小于二进制体积的数）。正常应该是 2.4 MB 量级。
+  - 二次确认：`tar tvf work/layer.tar` 看 `hello` 那行的大小是不是 0。
+  - 修法：照上面 `mk-layer.go` 把每个 error 都接住。**Go 里丢掉 error 就是在给未来的自己埋雷。**
+- **改了 layer 就必须从头重造**：digest 是内容寻址，`layer.tar` 变一个字节，`LAYER_DIGEST` → `CONFIG_DIGEST` → `MANIFEST_DIGEST` **整条链全变**。只改一处只会得到一堆对不上的引用。
+  - 稳妥做法：`rm -rf work/myimage`，然后 a→b→c→d 原样重跑。**别想着增量改。**
+
+**Go 编译类**
+
+- **`go: go.mod file not found in current directory or any parent directory`**：`go build` 需要模块上下文，`go mod init hello` 一下即可。（`go run mk-layer.go` 这种「显式指定单个 .go 文件」的写法不受影响，所以它能在没有 go.mod 的目录里跑。）
+- **`"os" imported and not used`**：Go 在**编译期**禁止「导入了不用」。`os` 的唯一用途就是 `os.Args`，一旦删掉 `wait` 分支，它就变成孤儿了。
+  - 三个同族错误的记忆模板：`imported and not used` = 删导入或补代码；`undefined: X` = 加导入；`declared and not used` = 删变量。
+  - 顺带：缩进用 **tab**（gofmt 规范），`gofmt -w main.go` 一把梭。
+- **`select {}` 会让程序 panic**：作为**唯一**的 goroutine，Go runtime 的 deadlock 检测会直接干掉进程：
+  ```
+  fatal error: all goroutines are asleep - deadlock!
+  goroutine 1 [select (no cases)]
+  ```
+  实测：`select {}` ❌ 崩（exit 2）；`for { time.Sleep(time.Hour) }` ✅；信号等待 ✅。
+  推荐用**信号等待**（上面 step 1 的写法）——好处是 `docker stop` 发的 SIGTERM 能让它体面退出，Session 1-3 演示 `Up → exited` 正好用得上。
+
+**Docker 报错会骗人**
+
+- **`docker: Error response from daemon: pull access denied for myimage, repository does not exist or may require 'docker login'`**：**九成不是登录问题。**
+  - 真正的信号是它上面那行 `Unable to find image 'myimage:1.0' locally`——本地没有，才去 pull。
+  - Docker Hub 对「私有仓库你没权限」和「仓库根本不存在」**返回的都是 401**（防止被人探测私有仓库是否存在），所以 daemon 只能把两个原因用 `or` 拼起来丢给你。这句话是「我拿到 401，原因你自己猜」，不是诊断结论。
+  - 另外 `myimage` 不含 `/`，Docker 会补全成 `docker.io/library/myimage`（官方 library 命名空间，只放 Docker 自己维护的镜像），你本地那个从没推上去过，当然不在。
+  - **判断口诀**：看到 `Unable to find image ... locally`，回头查**上一条命令**（通常是 `skopeo copy` 或 `docker build`）为什么没成功，**别去 `docker login`**。
+
+**结构 / 校验类**
+
+- blob 文件名必须 **exactly** 是 hex digest（**不带** `sha256:` 前缀）；`size` 必须和实际字节数**完全一致**，差 1 个字节就认不出来。
+- `architecture` 写错（Apple Silicon 是 `arm64`，不是 `amd64`）→ Docker 报平台不匹配。注意 `go build` 在 Apple Silicon 上默认就是 arm64，和这里一致。
+- `diff_ids` 是**未压缩** tar 的 digest；本节用纯 tar（`+tar`，不是 `+tar+gzip`），两者恰好相等，所以少一个坑。一旦改成 gzip，`diff_ids` 就得用**解压后**的 digest。
 - `shasum` 是 macOS 自带的；Linux 上对应命令是 `sha256sum`。本节在 Mac 做。
-- `architecture` 写错（M4 Mac 上是 `arm64`，不是 `amd64`）→ Docker 报平台不匹配。注意：`go build` 在 M4 Mac 上默认打出 arm64 二进制，和这里一致。
-- blob 文件名必须 exactly 是 hex digest（不带 `sha256:` 前缀），`size` 必须和实际字节数一致，差 1 个字节都认不出来。
-- `diff_ids` 是未压缩 tar 的 digest；本节用纯 tar（`+tar` 不是 `+tar+gzip`），两者一致，少个坑。
 - `go run mk-layer.go` 报 `expected 'package', found 'EOF'` → 文件是空的（内容没写进去），`head mk-layer.go` 检查下；文件名也要和命令里的一致。
+
+**自查清单**（跑完后逐条打勾）
+
+```bash
+ls -l hello                                   # 不是 0 字节
+file hello                                    # ELF ... ARM aarch64, statically linked
+tar tvf work/layer.tar                        # hello 那行 size > 0
+find work/myimage -type f | wc -l             # 5
+skopeo inspect oci:work/myimage               # 能输出 JSON，Architecture=arm64
+docker run --rm myimage:1.0                   # hello from OCI
+```
 
 **下一步**：→ Session 1-3（拿这个镜像的 rootfs 去喂 runc；那节要进 VM）
 

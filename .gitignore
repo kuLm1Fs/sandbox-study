@@ -1,2 +1,5 @@
 # 各 phase 的实验草稿区（手写镜像、runc bundle、程序输出等），不进仓库
 work/
+phase-1-mini-oci/hello
+phase-1-mini-oci/mk-layer.go
+phase-1-mini-oci/phase-1-mini-oci
