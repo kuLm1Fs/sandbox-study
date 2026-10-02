@@ -349,6 +349,10 @@ func main() {
   - 修法：照上面 `mk-layer.go` 把每个 error 都接住。**Go 里丢掉 error 就是在给未来的自己埋雷。**
 - **改了 layer 就必须从头重造**：digest 是内容寻址，`layer.tar` 变一个字节，`LAYER_DIGEST` → `CONFIG_DIGEST` → `MANIFEST_DIGEST` **整条链全变**。只改一处只会得到一堆对不上的引用。
   - 稳妥做法：`rm -rf work/myimage`，然后 a→b→c→d 原样重跑。**别想着增量改。**
+- **`jq` 路径写错时输出 `null`，而且退出码是 0**：`jq -r '.layer[0].digest'`（少了个 `s`，JSON 里是 `layers`）不会报错，只给你一个 `null`——写进文件、拼进 URL，一路静默错下去（`.../blobs/null` → 一个字节都收不到的 `HTTP 000`）。
+  - 症状识别：`cat x.digest` 输出 `null`。
+  - 修法：用 **`jq -er`**（`-e` 让 null/false 变成非零退出码），路径写错就当场失败，而不是把 `null` 传下去。
+  - 通用口诀：**任何"取值"步骤之后，先 `cat` 一眼再用**。这跟上一条「error 被丢掉」是同一类坑。
 
 **Go 编译类**
 
@@ -379,6 +383,10 @@ func main() {
 - `diff_ids` 是**未压缩** tar 的 digest；本节用纯 tar（`+tar`，不是 `+tar+gzip`），两者恰好相等，所以少一个坑。一旦改成 gzip，`diff_ids` 就得用**解压后**的 digest。
 - `shasum` 是 macOS 自带的；Linux 上对应命令是 `sha256sum`。本节在 Mac 做。
 - `go run mk-layer.go` 报 `expected 'package', found 'EOF'` → 文件是空的（内容没写进去），`head mk-layer.go` 检查下；文件名也要和命令里的一致。
+- **`oci-layout` 里的 `imageLayoutVersion` 拼错**（例如写成 `iamgeLayoutVersion`）→ 工具报 `invalid version of OCI layout file`。这个字段的值**参与判断**，所以拼错会被抓到；但它本质仍属「拼错 = 静默填零值」，只是恰好有工具替你兜底。
+- **macOS 的 `tar` 会给每个文件多打一个 `._<名字>` 伴生文件**（AppleDouble）：APFS 上文件带扩展属性（`com.apple.provenance` 等），macOS `tar` 默认把它们存成额外的 `._*` 条目 —— 于是你解出来的 rootfs 里多出一堆垃圾，条目数也虚高。
+  - 修法：`COPYFILE_DISABLE=1 tar -cf layer.tar .`（或 bsdtar 的 `--no-mac-metadata`）。
+  - 这正是 **Docker Desktop 构建时要设 `COPYFILE_DISABLE=1`** 的原因 —— 不是 Docker 的怪癖，是 macOS tar 的默认行为。
 
 **自查清单**（跑完后逐条打勾）
 
@@ -440,6 +448,11 @@ docker run --rm myimage:1.0                   # hello from OCI
 - 忘加 `sudo` → 各种 permission denied（runc 要建 namespace）。
 - `rootfs` 里没有 `/bin/sh` 却配了 `args: ["/bin/sh"]` → `no such file`；用你自己的 `/hello` 最稳。
 - `config.json` 的 `linux.namespaces` 缺了 `mount` → rootfs 挂载失败。
+- **`sudo runc run -d demo` 报 `cannot allocate tty if runc will detach without setting console socket`**：`config.json` 里 `process.terminal: true`（`runc spec` 的默认值）意思是「给我一个 TTY」，runc 默认把它接到你当前的 `/dev/tty`；而 `-d` 又说「你去后台，我不管了」—— 后台进程不可能占用前台终端，于是直接报错。
+  - 修法①：`sed -i 's/"terminal": true/"terminal": false/' config.json`（简单，日志走 stdout/stderr）。
+  - 修法②：给 `--console-socket /path/to/sock`，把控制台交给别人托管 —— **containerd / `ctr run -t` 就是这么干的**。
+  - 同一问题的另一面：`docker run` 不带 `-i -t` 时，`Cmd` 是 `sh` 也拿不到 stdin，**读到 EOF 立刻退出**（看起来像「什么都没发生」，退出码还是 0）。
+- **`sudo runc delete demo` 报 `container does not exist`**：**不是错**。`runc run`（不加 `-d`）是「创建 + 启动 + **退出后自动清理**」，前台跑完容器已经不存在了。只有 `runc create`、或 `runc run -d` 留下的容器才需要 `delete`。
 
 **下一步**：→ Session 1-4（runc 上面那层：containerd）
 
@@ -550,9 +563,20 @@ go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需
 ```
 
 **常见坑**：
-- 官方镜像在 `library/` 下：`busybox` → `library/busybox`。
-- manifest 可能是 index（多架构）：按 `platform.architecture == "arm64"` 挑一个，再取它的 manifest。
-- token 有有效期，401 了就重新拿，别长期缓存。
+- 官方镜像在 `library/` 下：`busybox` → `library/busybox`；`docker.io/` 前缀要剥掉。
+- manifest 可能是 index（多架构）：按 `platform.architecture == "arm64"` 挑一个，再取它的 manifest。注意 index 里 attestation 条目的平台是 `unknown/unknown`（**不是没有 `platform` 字段**），所以判据要用 os/arch 的**值**，不能只判断 `platform` 是否为 nil。
+- **`Accept` 头拼错不会报错，只会静默降级**（例如写成 `.../v1.idex.v1+json`）：registry 对不认识的类型只是忽略。所以判断「拿到了什么」要看响应里的 `mediaType`，而不是你请求了什么。
+- **token 5 分钟就过期**：换 token 的响应里 `expires_in: 300`。过期后再请求收到 `401` + `www-authenticate: …,error="invalid_token"`。正确姿势是「**任何请求收到 401 就换一次 token 再重发**」，而不是启动时拿一次用到死。
+- **blob 不在 registry 上**：`GET /v2/<repo>/blobs/<digest>` 返回 **307**，`location` 指向 CDN（CloudFront）上带签名的临时地址。
+  - `curl` **默认不跟随**重定向 —— 不加 `-L`，你保存到的是那个 **0 字节**的重定向响应体，却以为「下载成功」了。
+  - Go 的 `http.Client` **默认跟随**（最多 10 跳），所以代码里根本看不到这一步。
+  - 跨域重定向时 curl/Go 都会**丢掉 `Authorization` 头** —— 没关系：CDN 靠 URL 里的 `Signature` 鉴权，不需要 token。
+- **本地 `index.json` 只能引用「本地真实存在」的 manifest**：远端 index 可能列了 17 条（8 个平台 + 9 个 attestation），而你只下了 arm64 那一份字节 —— 本地 index 必须**自己造**、只放真正存下来的那一个，否则 `skopeo`/`docker` 会去找不存在的 blob（`undefined blob`）。
+- **层叠加时上层可以在同一路径换类型**（普通文件 → 硬链接 → 符号链接 → 目录）：新增前必须先拆掉旧的，否则报 `symlink … file exists`。**尤其别对已存在的硬链接直接截断写** —— 那会改到被链接的文件本体（例如 `/bin/busybox` 的字节）。正确姿势是「先 unlink，再 `O_CREATE|O_EXCL` 新建」。
+  - 单层镜像（busybox）永远暴露不了这个问题；拿 `python:3.12-alpine`（4 层）这类真实镜像才能测出来。
+- **内容寻址缓存**：blob 已存在时可以直接跳过下载，判断只值一次 `os.Stat` —— 因为名字就是内容的 sha256，而 `writeBlob` 的「先写临时文件、校验、再 rename」保证了「文件以正式名字存在」等价于「内容正确」。
+  - 但 **`tag → digest` 的映射不能缓存**：tag 是可变指针，缓存它就永远拉不到更新（而且无法察觉）。
+  - 口诀：**digest 是地址（可以存货），tag 是名字（必须去问）。**
 
 **验收**（对应 `tests/TESTS.md` T1-1 ~ T1-3）：
 - `go run ./impl run busybox:latest` 能跑起来
