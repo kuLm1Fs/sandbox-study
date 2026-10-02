@@ -192,12 +192,22 @@ func extractEntry(rootfsDir string, hdr *tar.Header, tr io.Reader) error {
 
 	switch hdr.Typeflag {
 	case tar.TypeDir:
+		// 上层可能在原本是文件的位置放目录
+		if fi, err := os.Lstat(target); err == nil && !fi.IsDir() {
+			if err := os.RemoveAll(target); err != nil {
+				return err
+			}
+		}
 		return os.MkdirAll(target, os.FileMode(hdr.Mode)&0o777)
 	case tar.TypeReg:
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode)&0o777)
+		// 必须先拆掉旧的：如果旧的是硬链接，直接截断会改到被链接的文件本体
+		if err := prepareTarget(target); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(hdr.Mode)&0o777)
 		if err != nil {
 			return err
 		}
@@ -206,6 +216,9 @@ func extractEntry(rootfsDir string, hdr *tar.Header, tr io.Reader) error {
 		return err
 	case tar.TypeSymlink:
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := prepareTarget(target); err != nil {
 			return err
 		}
 		return os.Symlink(hdr.Linkname, target)
@@ -219,6 +232,9 @@ func extractEntry(rootfsDir string, hdr *tar.Header, tr io.Reader) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
+		if err := prepareTarget(target); err != nil {
+			return err
+		}
 		return os.Link(src, target)
 	case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
 		// 设备节点要 mknod + CAP_MKNOD。runc 会自己挂 /dev，所以这里跳过。
@@ -227,6 +243,21 @@ func extractEntry(rootfsDir string, hdr *tar.Header, tr io.Reader) error {
 	default:
 		return nil
 	}
+}
+
+// prepareTarget 在新建之前把同路径的旧东西拿掉。
+//
+// 层叠加时，上层可以在同一路径上换类型（普通文件 / 硬链接 / 符号链接 / 目录），
+// 所以必须先拆 —— `tar -x` 也是这么干的。
+// 尤其对硬链接：直接截断写会改到被链接的文件本体（比如 /bin/busybox 的字节）。
+func prepareTarget(target string) error {
+	if _, err := os.Lstat(target); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return os.RemoveAll(target)
 }
 
 // safeJoin 把 tar 里的路径安全地拼到 rootfs 下。
