@@ -2,6 +2,8 @@
 
 在 Linux VM 或 Mac 上执行，当前目录为 `phase-1-mini-oci/`。以下用例在 mini-oci 实现完成后执行。T1-1/T1-2 可在 Mac 或 VM 执行；T1-3 的 `run` 需要 runc，必须在 Linux VM 执行；T1-4/T1-5 在 VM 执行。每条用例：操作 → 预期结果，通过才算实验做对。
 
+**状态**：T1-1~T1-3 已于 2026-10-02 在实机通过；T1-4/T1-5/T1-6 待 Session 1-3/1-4 时验证。
+
 | 编号 | 操作 | 预期结果 |
 |---|---|---|
 | T1-1 | `go run ./impl pull busybox:latest` | 生成 `work/output/images/busybox/`，含 `index.json`、`oci-layout`、`blobs/sha256/`，且各文件 digest 与 manifest 里声明的一致 |

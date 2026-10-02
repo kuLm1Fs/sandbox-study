@@ -381,6 +381,7 @@ func main() {
 - blob 文件名必须 **exactly** 是 hex digest（**不带** `sha256:` 前缀）；`size` 必须和实际字节数**完全一致**，差 1 个字节就认不出来。
 - `architecture` 写错（Apple Silicon 是 `arm64`，不是 `amd64`）→ Docker 报平台不匹配。注意 `go build` 在 Apple Silicon 上默认就是 arm64，和这里一致。
 - `diff_ids` 是**未压缩** tar 的 digest；本节用纯 tar（`+tar`，不是 `+tar+gzip`），两者恰好相等，所以少一个坑。一旦改成 gzip，`diff_ids` 就得用**解压后**的 digest。
+- macOS 的 `tar` 会往包里塞 AppleDouble（`._*`）伴生文件——`tar tvf` 里看到 `._hello` 别慌；用系统 tar 造测试镜像时 `COPYFILE_DISABLE=1 tar ...` 关掉它。
 - `shasum` 是 macOS 自带的；Linux 上对应命令是 `sha256sum`。本节在 Mac 做。
 - `go run mk-layer.go` 报 `expected 'package', found 'EOF'` → 文件是空的（内容没写进去），`head mk-layer.go` 检查下；文件名也要和命令里的一致。
 - **`oci-layout` 里的 `imageLayoutVersion` 拼错**（例如写成 `iamgeLayoutVersion`）→ 工具报 `invalid version of OCI layout file`。这个字段的值**参与判断**，所以拼错会被抓到；但它本质仍属「拼错 = 静默填零值」，只是恰好有工具替你兜底。
@@ -448,7 +449,21 @@ docker run --rm myimage:1.0                   # hello from OCI
    tar -xf ../layer.tar -C rootfs   # 用 Mac 传过来的 layer
    runc spec                        # 生成默认 config.json
    ```
-2. 改 `config.json`：`process.args` → `["/hello"]`，确认 `root.path` 是 `"rootfs"`。
+2. 改 `config.json`（复制粘贴整段；heredoc 收尾的 `EOF` 必须顶格，见 Session 1-2 常见坑）：
+   ```bash
+   command -v python3 >/dev/null || sudo apt install -y python3
+   python3 - <<'EOF'
+   import json
+   p = 'config.json'
+   c = json.load(open(p))
+   c['process']['args'] = ['/hello']
+   assert c['root']['path'] == 'rootfs', c['root']
+   json.dump(c, open(p, 'w'), indent=2)
+   print('args =', c['process']['args'])
+   EOF
+   ```
+
+   预期输出：`args = ['/hello']`。如果 assert 挂了，说明 `runc spec` 生成的模板跟预想的不一样，先停下来看一眼 `config.json`，别往下走。
 3. 跑起来：
    ```bash
    sudo runc run demo
@@ -485,6 +500,15 @@ docker run --rm myimage:1.0                   # hello from OCI
 - `limactl copy` 提示 instance 不存在 → VM 还没建或名字不对：`limactl list` 看实际名字，对上再拷。
 - `tar -xf ../layer.tar` 报找不到文件 → "动手前"第 3 步的 `cp` 没做或目录错了，`ls ~/p1/work/layer.tar` 确认。
 
+**自查清单**（跑完后逐条打勾）：
+
+```bash
+ls -l ~/p1/work/layer.tar                  # 传进来了，不是 0 字节
+ls ~/p1/work/bundle/rootfs/hello           # 解出来了
+grep -A2 '"args"' ~/p1/work/bundle/config.json  # 看到 "/hello"
+sudo runc run demo                         # hello from OCI，容器退出
+```
+
 **下一步**：→ Session 1-4（runc 上面那层：containerd）
 
 ---
@@ -497,8 +521,14 @@ docker run --rm myimage:1.0                   # hello from OCI
 
 **背景**：containerd 负责镜像管理、容器生命周期、快照、事件，对外暴露 gRPC API。`ctr` 是它自带的调试 CLI（难用但直接）。docker CLI 背后调的也是 containerd（经由 dockerd）。
 
-**动手**：
-1. 确认 containerd 在跑：`sudo systemctl status containerd`（没装服务的直接 `sudo containerd &`）。
+**动手**（VM 里；进 VM：`limactl shell --start sandbox`，VM 的起法见 Session 1-3「动手前」）：
+1. 装好并确认 containerd 在跑：
+   ```bash
+   command -v ctr >/dev/null || sudo apt install -y containerd
+   sudo ctr version
+   ```
+
+   预期输出：能打印出 containerd 版本号（连不上 daemon 会直接报错，见常见坑）。
 2. 拉镜像、跑容器：
    ```bash
    sudo ctr image pull docker.io/library/busybox:latest
@@ -521,6 +551,15 @@ docker run --rm myimage:1.0                   # hello from OCI
 **常见坑**：
 - containerd 的 namespace 和 Linux namespace 是两码事——前者只是 containerd 内部给容器/镜像分组的标签。
 - k8s 用的 namespace 叫 `k8s.io`：`sudo ctr -n k8s.io containers list` 能看到 k8s 拉起的容器（延伸玩法）。
+- `ctr: failed to dial "/run/containerd/containerd.sock"` → daemon 没在跑：`sudo systemctl start containerd`，没装 systemd 的环境直接 `sudo containerd &` 另起一个终端跑。
+
+**自查清单**（跑完后逐条打勾）：
+
+```bash
+sudo ctr version                    # 能打印版本
+sudo ctr image ls                   # 看到 busybox:latest
+sudo ctr -n demo containers list     # demo 里有容器；不加 -n 看不到它
+```
 
 **下一步**：→ Session 1-5（镜像是怎么"构建"出来的：BuildKit）
 
@@ -548,11 +587,21 @@ docker run --rm --privileged -v $PWD:/tmp/work --entrypoint buildctl-daemonless.
 
 预期输出：一堆 `#1 [internal] load build definition` / `#n DONE` 日志，最后出现 `writing image sha256:… done`。
 
+（heredoc 收尾的 `EOF` 必须顶格，见 Session 1-2 常见坑——这里 `<<'EOF'` 是一样的写法。）
+
 **验证**：口头回答 BuildKit 多解决了什么（并发构建 + 细粒度缓存；经典 builder 串行等层）。
 
 **常见坑**：
 - 忘加 `--privileged` → buildkitd 起不来。
 - 第一次拉 `moby/buildkit:master` 镜像很慢，耐心等。
+
+**自查清单**（跑完后逐条打勾）：
+
+```bash
+ls -l /tmp/bk/Dockerfile
+docker image inspect moby/buildkit:master --format='{{.Architecture}}'  # 拉下来了，第一次慢
+# 构建日志最后看到 writing image sha256:… done
+```
 
 **下一步**：→ 📦 项目 mini-oci（把本章全串起来）
 
@@ -560,27 +609,36 @@ docker run --rm --privileged -v $PWD:/tmp/work --entrypoint buildctl-daemonless.
 
 ## 📦 项目：mini-oci（Go，2–3 个 session）
 
-把 Session 1-2 的手工作业写成真正的工具。接口：
+**状态：已完成**（2026-10-02，实机跑通，T1-1~T1-3 通过）。下面是代码导览，不是作业——读代码时对照着看。
+
+把 Session 1-2 的手工作业写成了真正的工具。接口：
 
 ```bash
-# 以下都在 phase-1-mini-oci/ 目录下执行
+# 以下都在 phase-1-mini-oci/ 目录下执行（go.work 已配好，go run ./impl 能直接跑）
 go run ./impl pull busybox:latest     # 拉 manifest + layers → work/output/images/busybox（OCI layout）
 go run ./impl unpack busybox:latest   # work/output/images/busybox → work/output/bundle（rootfs + config.json）
 go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需 root，见下）
 ```
 
-**实现约定**（写代码时遵守，测试按此验收）：
+**代码导览**（`impl/`，约 1000 行）：
+
+| 文件 | 干什么 |
+|---|---|
+| `registry.go` | registry HTTP 客户端：401 → 按 `WWW-Authenticate` 去 token 服务换 token，重发请求 |
+| `pull.go` | 内容寻址落盘 + digest 校验 |
+| `unpack.go` | 解 gzip/tar、硬链接、whiteout、diff_id 校验；`prepareTarget` 处理层间覆盖（见下） |
+| `spec.go` | image config → runtime-spec `config.json` |
+| `run.go` | pull + unpack + `runc run` 一条龙，跑完 `runc delete` 清理 |
+| `layout.go` | 临时文件 → 校验 → 改名（落盘不留半截文件） |
+| `main.go` | 子命令分发 |
+
+**实现约定**（测试按此验收）：
 - 所有输出一律写进 `work/output/`，不污染 `impl/`。
 - 镜像名映射：`busybox:latest` → `work/output/images/busybox`（去掉 `library/` 前缀和 tag）。
 - `run` 需要 root 建 namespace：先 `go build -o work/mini-oci ./impl`，再 `sudo work/mini-oci run busybox:latest`（sudo 不改变当前目录，相对路径照常工作）。
 - `run` 需要 runc（Linux only）：`pull`/`unpack` 在 Mac 就能做，`run` 那步去 VM 里做（work/ 跟着机器走，把 `work/output` 拷过去，或在 VM 里重跑一次 pull/unpack 也行）。
 
-**建议实现顺序**（每步都可独立验证）：
-1. `pull`：先调通 registry HTTP API（见下），能把 blobs 下到本地就算成。
-2. `unpack`：解 tar + 按 runtime-spec 写 `config.json`（复用 Session 1-3 的经验）。
-3. `run`：拼起来，用 `os/exec` 调 `runc run`。
-
-**Registry API 流程**（Docker Hub，第一次调通最花时间，值得）：
+**Registry API 流程**（已实现，留作对照）：
 
 ```
 1. GET https://registry-1.docker.io/v2/
@@ -609,7 +667,10 @@ go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需
   - 但 **`tag → digest` 的映射不能缓存**：tag 是可变指针，缓存它就永远拉不到更新（而且无法察觉）。
   - 口诀：**digest 是地址（可以存货），tag 是名字（必须去问）。**
 
-**验收**（对应 `tests/TESTS.md` T1-1 ~ T1-3）：
+**真实镜像才暴露的 bug**（`638aa50` 修的，值得细看）：
+`python:3.12-alpine` 的 layer 2 把 `bin/tar` 从硬链接换成了符号链接——OCI 层叠加语义允许上层在同一路径换文件类型，原来的 `os.Symlink` 直接报 `file exists`。修法：新建前 `Lstat + RemoveAll`（`prepareTarget`）；普通文件用 `O_CREATE|O_EXCL` 且先 unlink，否则截断写会改到硬链接本体的字节（比如 `/bin/busybox`）。**"层怎么叠"正是 Phase 2 overlayfs 的主题**，到时候回来看这段代码。
+
+**验收**（对应 `tests/TESTS.md` T1-1 ~ T1-3，已通过）：
 - `go run ./impl run busybox:latest` 能跑起来
 - `go vet ./...` 无报错
 - `git status` 干净：`work/` 下的东西没有混进仓库
