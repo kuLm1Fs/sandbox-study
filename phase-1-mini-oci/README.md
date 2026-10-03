@@ -591,6 +591,7 @@ go run ./impl run busybox:latest      # pull + unpack + runc run 一条龙（需
 
 ## 延伸（可选，不阻塞）
 
+- [`tools/`](tools/README.md)：**手工版参照物**。`handpull.sh` 用 curl+jq 把 pull 再做一遍（产物与 `impl/` 逐字节相同，可 `diff -r` 对拍）；`mkmultilayer.sh` 离线造一个带 whiteout 的 3 层镜像，用来验证 `unpack` 的层叠加。
 - spec 原文（当字典查，不当课文啃）：[image-spec](https://github.com/opencontainers/image-spec) / [runtime-spec](https://github.com/opencontainers/runtime-spec) / [distribution-spec](https://github.com/opencontainers/distribution-spec)
 - `ctr -n k8s.io containers list`：看 k8s 在 containerd 里留下的容器
 - [containerd 入门实操](https://github.com/mukappalambda/go-examples/blob/HEAD/container/containerd/getting-started.md)
