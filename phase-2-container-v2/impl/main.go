@@ -10,12 +10,19 @@
 package main
 
 import (
+	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
+)
+
+var (
+	memLimit  = flag.String("memory", "100M", "容器内存上限（cgroup memory.max, 如 100M、1G、max）")
+	pidsLimit = flag.String("pids", "20", "容器进程数上限（cgroup pids.max")
 )
 
 // rootfs 从哪来：phase-1-mini-oci 的工具解包出来的那棵树。
@@ -37,17 +44,20 @@ func usage() {
 }
 
 func main() {
+
+	flag.Parse()
 	// child 分支：由 run() 通过 /proc/self/exe 重新执行进入（argv[1] == "child"）
 	if len(os.Args) > 1 && os.Args[1] == "child" {
 		must(child())
 		return
 	}
-	// 至少要有 "run" + 一个命令，否则 child 里 os.Args[3] 会越界
-	if len(os.Args) < 3 || os.Args[1] != "run" {
+
+	args := flag.Args()
+	if len(args) < 2 || args[0] != "run" {
 		usage()
 		os.Exit(2)
 	}
-	must(run())
+	must(run(args[1], args[2:]))
 }
 
 // run 跑在**宿主机**上（root），干两件事：
@@ -58,7 +68,7 @@ func main() {
 // 为什么 cgroup 由父进程管：cgroup **不属于任何 namespace**，它是宿主机的资源视图。
 // 父进程没有新建 PID namespace，用它看到的 PID（cmd.Process.Pid）最不容易出歧义。
 // docker/containerd 也是这个分工：由 shim/父进程建 cgroup，再把容器进程放进去。
-func run() error {
+func run(name string, args []string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("需要 root（要建 namespace、挂载、写 cgroup）")
 	}
@@ -71,7 +81,7 @@ func run() error {
 	}
 
 	// ⚠️ 开头的 "/" 必须有：少了它就是相对路径，Go 会按 cwd 去找 "proc/self/exe"
-	cmd := exec.Command("/proc/self/exe", append([]string{"child", rootfs}, os.Args[2:]...)...)
+	cmd := exec.Command("/proc/self/exe", append([]string{"child", rootfs, name}, args...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -96,9 +106,14 @@ func run() error {
 		_ = cmd.Process.Kill()
 		return err
 	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("容器进程退出: %w", err)
+	err = cmd.Wait()
+	dumpCgroupStats()
+	if err != nil {
+		return fmt.Errorf("容器进程退出：%w", err)
 	}
+
+	removeCgroup()
+
 	return nil
 }
 
@@ -111,14 +126,18 @@ func setupCgroup() error {
 	if err := os.MkdirAll(cgroupDir, 0o755); err != nil {
 		return fmt.Errorf("建 cgroup %s: %w", cgroupDir, err)
 	}
-	// v2 里控制器要先在父级打开；先确认它真的可用，免得后面写失败看不懂
-	pidsMax := filepath.Join(cgroupDir, "pids.max")
-	if _, err := os.Stat(pidsMax); err != nil {
-		return fmt.Errorf("pids controller 未启用，找不到 %s：%w", pidsMax, err)
+	limits := map[string]string{
+		"pids.max":   *pidsLimit,
+		"memory.max": *memLimit,
 	}
-	// 进程数上限：配合后面的内存上限，防止 fork 炸弹
-	if err := os.WriteFile(pidsMax, []byte("20"), 0o644); err != nil {
-		return fmt.Errorf("写 pids.max: %w", err)
+	for file, val := range limits {
+		p := filepath.Join(cgroupDir, file)
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("控制器不可用，找不到 %s：%w", p, err)
+		}
+		if err := os.WriteFile(p, []byte(val), 0o644); err != nil {
+			return fmt.Errorf("写 %s = %s: %w", file, val, err)
+		}
 	}
 	return nil
 }
@@ -205,4 +224,18 @@ func must(err error) {
 		fmt.Fprintf(os.Stderr, "mini-container: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// dumpCgroupStats 打印 cgroup 记的账。容器被 OOMkiller 干掉时
+// 这是最直接的证据（否则只能看到 “exit status 137”， 不知道为什么）。
+func dumpCgroupStats() {
+	max, _ := os.ReadFile(filepath.Join(cgroupDir, "memory.max"))
+	peak, _ := os.ReadFile(filepath.Join(cgroupDir, "memory.peak"))
+	events, _ := os.ReadFile(filepath.Join(cgroupDir, "memory.events"))
+	fmt.Printf("--- cgroup 现场（memroy.max=%s memory.peak= %s) --- \n%s",
+		trimNL(max), trimNL(peak), events)
+}
+
+func trimNL(b []byte) string {
+	return string(bytes.TrimSpace(b))
 }
