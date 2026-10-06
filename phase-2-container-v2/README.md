@@ -204,4 +204,10 @@ sudo iptables -t nat -L POSTROUTING -n | grep -c MASQUERADE  # 1
 - **`iptables -t nat POSTROUTING …` → `Bad argument 'POSTROUTING'`**：漏了 `-A`。加规则是 `-A`，删规则是 `-D`。
 - **ping 卡住 vs 立刻报错，是两种病**：`Network is unreachable`（立刻）= 本机没路由，查 `ip route`；**一直卡住/超时** = 包出得去回不来，查 `ip_forward` / NAT / 回程路由。
 
+### 讲义方案 vs `impl` 方案（都正确，场景不同）
+
+- **本节讲义用 bridge（`br0`）**：多个 netns 插到同一个二层交换机上，互通且能扩到多个容器——这就是 **docker0** 的原理。
+- **`impl/network.go` 用直连 veth**：一根网线直接连宿主机和容器，单容器场景更简单（少一层设备、少几条命令）。
+- 要跑多个容器时再引入 bridge；这也是 CNI 插件（bridge + ipam）做的事。
+
 **下一步**：→ Session 2-4（overlayfs），然后合起来做 v2.0（cgroup + seccomp + 网络三层隔离）。
