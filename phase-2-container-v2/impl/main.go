@@ -254,7 +254,7 @@ func dumpCgroupStats() {
 	max, _ := os.ReadFile(filepath.Join(cgroupDir, "memory.max"))
 	peak, _ := os.ReadFile(filepath.Join(cgroupDir, "memory.peak"))
 	events, _ := os.ReadFile(filepath.Join(cgroupDir, "memory.events"))
-	fmt.Printf("--- cgroup 现场（memroy.max=%s memory.peak= %s) --- \n%s",
+	fmt.Printf("--- cgroup 现场（memory.max=%s memory.peak= %s) --- \n%s",
 		trimNL(max), trimNL(peak), events)
 }
 
