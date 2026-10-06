@@ -75,7 +75,7 @@ func enableNAT() error {
 	if err != nil {
 		return err
 	}
-	if err := iptables("-t", "nat", "POSTROUTING", "-s", netCIDR, "-o", iface, "-j", "MASQUERADE"); err != nil {
+	if err := iptables("-t", "nat", "-A", "POSTROUTING", "-s", netCIDR, "-o", iface, "-j", "MASQUERADE"); err != nil {
 		return err
 	}
 	fmt.Printf("NAT: %s → %s (MASQUERADE)\n", netCIDR, iface)
