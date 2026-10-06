@@ -4,3 +4,6 @@ phase-1-mini-oci/hello
 phase-1-mini-oci/mk-layer.go
 phase-1-mini-oci/phase-1-mini-oci
 phase-2-container-v2/phase-2-container-v2
+
+# 播客音频体积大不进仓库，只保留脚本
+podcasts/*.mp3
