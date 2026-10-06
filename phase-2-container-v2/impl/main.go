@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 )
@@ -165,6 +166,7 @@ func child() error {
 	rootfs := os.Args[2]
 	name := os.Args[3]
 	args := os.Args[4:]
+	runtime.LockOSThread()
 
 	// 0) 把根挂载设成"私有"。
 	//    新 mount namespace 会**继承父级的传播类型**（通常是 shared），
@@ -215,6 +217,9 @@ func child() error {
 
 	// 5) execve：把自己整个换成目标程序。执行成功后，"准备阶段"的进程就不存在了，
 	//    目标程序直接接手 PID 1。
+	if err := installSeccomp(); err != nil {
+		return err
+	}
 	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	return syscall.Exec(name, append([]string{name}, args...), env)
 }

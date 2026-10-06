@@ -20,5 +20,9 @@
 
 ## 进度
 
-- [ ] Session 2-1 ~ 2-5（见 docs/学习路线.md）
+- [x] Session 2-1｜cgroups v2 动手（手建 cgroup 限内存、看 OOM killer 干活）
+- [x] Session 2-2｜自制容器加 cgroup 限额（`-memory`/`-pids`）；容器内内存炸弹被 cgroup OOM 杀掉，宿主机不受影响
+- [x] Session 2-3｜seccomp（容器内 `mount` 返回 EPERM；`/proc/self/status` 里 `Seccomp: 2`）
+- [ ] Session 2-4｜overlayfs
+- [ ] Session 2-5｜netns + veth + NAT
 - [ ] v2.0 跑通 + README
