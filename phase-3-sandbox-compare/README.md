@@ -160,7 +160,7 @@ ls -lh /var/lib/libvirt/images/demo.qcow2
 
 ## Session 3-2｜Firecracker：第一个 microVM（40 分钟）
 
-**在哪做**：Linux VM（要 root，`/dev/kvm` 存在）
+**在哪做**：WSL2（`ssh PCGaming`，用户 `kms`；要 root 密码，sudo 的命令你亲手敲）
 
 **目标**：跑通官方 getting-started，ssh 进 microVM，`uname -r` 和宿主机不一样。
 
@@ -168,25 +168,30 @@ ls -lh /var/lib/libvirt/images/demo.qcow2
 
 ```bash
 ls /dev/kvm && echo kvm-ok
-uname -m   # 预期：aarch64（下 aarch64 的二进制和 kernel）
+uname -m   # 预期：x86_64（下 x86_64 的二进制和 kernel）
+mkdir -p ~/fc && cd ~/fc && pwd   # 本节工作目录
 ```
 
-**动手**（跟着[官方 getting-started](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md) 走，下面的骨架是步骤清单，**版本号和下载链接以文档为准**，不要背）：
+**动手**（跟着[官方 getting-started](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md) 走，**kernel/rootfs 链接以文档为准**，不要背）：
 
-1. 下 Firecracker 二进制：去 [releases 页](https://github.com/firecracker-microvm/firecracker/releases) 拿最新版号，设成 `FC_VER`，下 aarch64 包：
+1. 下 Firecracker 二进制（v1.17.0，x86_64）：
 
 ```bash
-FC_VER=<releases 页看到的最新版>   # 以页面为准，不要猜
-# x86_64 机器：
-wget https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-x86_64.tgz
-tar xzf firecracker-${FC_VER}-x86_64.tgz
-./release-${FC_VER}-x86_64/firecracker-v${FC_VER}-x86_64 --version   # 预期：打印版本号
-# ARM64 机器把 x86_64 换成 aarch64，kernel/rootfs 也取 arm64 版本
+cd ~/fc
+wget https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz
+tar xzf firecracker-v1.17.0-x86_64.tgz
+./release-v1.17.0-x86_64/firecracker-v1.17.0-x86_64 --version   # 预期：打印 v1.17.0
 ```
 
-2. 下 kernel + rootfs：按 getting-started 文档里的 **aarch64** 链接拿 `vmlinux` 和 `ubuntu-22.04.ext4`（文档会给地址，复制粘贴）。
+2. 下 kernel + rootfs：按 getting-started 文档的 **x86_64** 链接拿 kernel 和 `ubuntu-22.04.ext4`。
+   ⚠️ **kernel 必须是未压缩的 vmlinux**——Firecracker 不认压缩内核，别拿宿主 `/boot/vmlinuz` 顶替（那是 gzip 包过的）。
 
-3. 配 tap 网络（宿主机侧）：
+```bash
+file vmlinux   # 预期：ELF 64-bit LSB executable，不要看到 "gzip compressed"
+ls -lh ubuntu-22.04.ext4 vmlinux
+```
+
+3. 配 tap 网络（宿主机侧；tap + NAT 要自己写，WSL 本地做，没有锁门风险）：
 
 ```bash
 sudo ip tuntap add tap0 mode tap
