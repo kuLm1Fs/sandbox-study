@@ -4,6 +4,31 @@
 >
 > **目标**：亲手跑通 KVM / Firecracker / gVisor / Kata，输出一张"隔离边界 / 启动速度 / 内存开销 / 适用场景"对比表。
 
+## 环境前置（2026-10-06 实机修正，先看这个）
+
+| 检查 | x86_64（WSL2，本次采用） | aarch64（Mac + Lima） |
+|---|---|---|
+| 能不能跑本节 | ✅ 实测 18 秒起到 `login:`、无 RCU stall、时钟正常 | ❌ **过不了 guest 实测**：Apple VZ 的嵌套虚拟化时钟错乱（guest 时间快 2.3 倍）→ 卡死在 initramfs |
+| 云镜像 | `jammy-server-cloudimg-amd64.img` | `...-arm64.img` |
+| 固件 | 走 BIOS，**不需要 UEFI** | **UEFI-only**：要 `qemu-efi-aarch64` + `--boot uefi` |
+| Firecracker 包 | `firecracker-…-x86_64.tgz` | `…-aarch64.tgz` |
+
+**四条判据**（`ls /dev/kvm` 只是必要条件，不是充分条件）：能到 `login:`、`dmesg` 无 `rcu.*stall`、guest 时钟与宿主一致、guest `uname -r` ≠ 宿主。完整证据见 [mistakes/错题本.md](mistakes/错题本.md)。
+
+**兜底命令**（libvirt 抽风时用它，也更能体现"KVM 是内核能力、QEMU 是用户态程序"）：
+
+```bash
+qemu-system-x86_64 -M q35 -accel kvm -cpu host -smp 2 -m 2048 \
+  -drive if=virtio,file=/tmp/jammy-server-cloudimg-amd64.img,format=qcow2 \
+  -drive if=virtio,file=/tmp/seed.iso,format=raw,readonly=on \
+  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0 \
+  -nographic
+```
+
+（把 `-accel kvm` 换成 `-accel tcg`，就亲身感受得到"有没有 KVM 加速"的差别。）
+
+---
+
 ## 入口自测（15 分钟，先做这个）
 
 做 `docs/入口自测.md` 的 Phase 3 五道题。判定：全对可压缩/跳过已掌握的 session；错 3 题以上按计划完整学。
@@ -23,33 +48,40 @@
 
 **在哪做**：Linux VM（要 root，`/dev/kvm` 存在）
 
-**目标**：用 cloud image 10 分钟起一台 ARM64 VM，打快照、恢复，验证回到快照点。
+**目标**：用 cloud image 起一台 VM（x86 用 amd64 / ARM64 用 arm64），打快照、恢复，验证回到快照点。
 
 **前置自检**：
 
 ```bash
-ls /dev/kvm && echo kvm-ok
-uname -m   # 预期：aarch64
+ls -l /dev/kvm && echo kvm-ok
+uname -m   # x86_64（WSL）/ aarch64（Mac Lima）
 ```
+
+⚠️ 先读上面「环境前置」：**Apple Silicon 的 Lima 过不了 guest 实测**，本节在 WSL2 上做。
 
 **动手**：
 
 1. 装包：
 
 ```bash
-sudo apt update && sudo apt install -y qemu-kvm libvirt-daemon-system virtinst genisoimage
+# x86_64：
+sudo apt update && sudo apt install -y qemu-system-x86 qemu-utils libvirt-daemon-system virtinst genisoimage cpu-checker
 virsh --version   # 预期：有版本号输出
+sudo kvm-ok       # 预期：KVM acceleration can be used
+# ARM64 把 qemu-system-x86 换成 qemu-system-arm + qemu-efi-aarch64
 ```
 
-2. 下 Ubuntu ARM64 cloud image：
+2. 下 Ubuntu cloud image（**按架构选**，x86 用 amd64）：
 
 ```bash
-cd /tmp && wget -q --show-progress \
-  https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img \
+cd /tmp && wget -c --show-progress \
+  https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img \
   -O demo.qcow2
 qemu-img info demo.qcow2 | grep "virtual size"   # 预期：virtual size: 2.2G 之类
 sudo cp demo.qcow2 /var/lib/libvirt/images/demo.qcow2
 ```
+
+（ARM64 机器把 `-amd64` 换成 `-arm64`，并在第 4 步加 `--boot uefi`——ARM64 云镜像是 **UEFI-only**，少这个参数会停在 `no bootable device`。）
 
 3. 做 cloud-init seed（设登录密码，省掉装系统向导）：
 
@@ -69,7 +101,13 @@ genisoimage -output /tmp/seed.iso -volid cidata -joliet -rock user-data meta-dat
 ls -lh /tmp/seed.iso   # 预期：几百 KB 的 iso
 ```
 
-4. 起 VM（`--import` 直接用现成磁盘，不走安装）：
+4. 起 VM（`--import` 直接用现成磁盘，不走安装）。**先确认默认网络是 active**——libvirt 的 default 网络默认是 inactive，不启会报 `Network not found`：
+
+```bash
+sudo virsh net-list --all
+# State 是 inactive 就先启：
+sudo virsh net-start default && sudo virsh net-autostart default
+```
 
 ```bash
 sudo virt-install --name demo --ram 2048 --vcpus 2 \
@@ -79,7 +117,7 @@ sudo virt-install --name demo --ram 2048 --vcpus 2 \
   --graphics none --console pty,target_type=serial --import
 ```
 
-预期：cloud-init 跑完后出现 `demo login:`。用 `demo` / `demo123` 登录。退出 console 按 `Ctrl+]`。
+预期：约 20–40 秒后出现 `demo login:`。用 **`ubuntu`** / `demo123` 登录（⚠️ **Ubuntu 云镜像的默认用户是 `ubuntu`，不是 `demo`**）。退出 console 按 `Ctrl+]`。
 
 5. 打快照、做标记、恢复、验证：
 
@@ -108,7 +146,13 @@ sudo virsh snapshot-list demo  # snap1 在
 ls -lh /var/lib/libvirt/images/demo.qcow2
 ```
 
-**常见坑**：（待实机补充）
+**常见坑**：
+
+- **`no bootable device` / 卡在 `Booting from Hard Disk...`（仅 ARM64）**：ARM64 云镜像 **UEFI-only**，要装 `qemu-efi-aarch64` 并加 `--boot uefi`（x86 走 BIOS，不需要）。
+- **固件层 `Synchronous Exception`（ARM64 + libvirt）**：libvirt 自动选的是 `AAVMF_CODE.secboot.fd`（带安全启动），加载 `shimaa64.efi` 时在嵌套虚拟化下崩。显式指定非 secboot 固件：`--boot loader=/usr/share/AAVMF/AAVMF_CODE.fd,loader_ro=yes,loader_type=pflash,nvram_template=/usr/share/AAVMF/AAVMF_VARS.fd`。
+- **`Network not found: no network with matching name 'default'`**：`sudo virsh net-start default && sudo virsh net-autostart default`。
+- **`demo / demo123` 登录不上**：默认用户是 **`ubuntu`**（实机证据：guest 日志 `ci-info: no authorized SSH keys fingerprints found for user ubuntu.`）。
+- **guest 卡在 initramfs、60 秒后爆 `rcu_sched detected stalls`**：这台机器的**嵌套虚拟化时钟不可信**（guest 时间比墙钟快 2.3 倍）。换 WSL2/真 KVM 环境——见 [mistakes/错题本.md](mistakes/错题本.md)。
 
 **下一步**：→ Session 3-2（Firecracker：比这台 VM 轻 100 倍的 microVM）
 
@@ -133,9 +177,11 @@ uname -m   # 预期：aarch64（下 aarch64 的二进制和 kernel）
 
 ```bash
 FC_VER=<releases 页看到的最新版>   # 以页面为准，不要猜
-wget https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-aarch64.tgz
-tar xzf firecracker-${FC_VER}-aarch64.tgz
-./release-${FC_VER}-aarch64/firecracker-v${FC_VER}-aarch64 --version   # 预期：打印版本号
+# x86_64 机器：
+wget https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-x86_64.tgz
+tar xzf firecracker-${FC_VER}-x86_64.tgz
+./release-${FC_VER}-x86_64/firecracker-v${FC_VER}-x86_64 --version   # 预期：打印版本号
+# ARM64 机器把 x86_64 换成 aarch64，kernel/rootfs 也取 arm64 版本
 ```
 
 2. 下 kernel + rootfs：按 getting-started 文档里的 **aarch64** 链接拿 `vmlinux` 和 `ubuntu-22.04.ext4`（文档会给地址，复制粘贴）。
