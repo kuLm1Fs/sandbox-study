@@ -91,8 +91,19 @@ func run(name string, args []string) error {
 		Cloneflags: syscall.CLONE_NEWPID | // 自己的进程号空间 → 容器里第一个进程是 PID 1
 			syscall.CLONE_NEWUTS | // 自己的 hostname
 			syscall.CLONE_NEWNS | // 自己的挂载表（pivot_root 的前提）
-			syscall.CLONE_NEWIPC | // 自己的 IPC（不加就是和宿主机共用）
-			syscall.CLONE_NEWNET, // 自己的网络栈（现在只有 lo；Session 2-5 配 veth）
+			syscall.CLONE_NEWIPC, // 自己的 IPC（不加就是和宿主机共用）
+		// 注意：这里**没有** CLONE_NEWNET —— 网络不再由容器自己建，
+		// 而是宿主机先把 netns 建好、接好 veth，容器再 setns 进去（见 network.go）
+	}
+
+	// 接线在容器启动**之前**做（父进程干这活最自然：只有它能碰宿主机的网络）
+	if err := setupNetwork(); err != nil {
+		return err
+	}
+	defer cleanupNetwork() // 容器退出后把网线和 NAT 规则撤掉
+
+	if err := enableNAT(); err != nil {
+		return err
 	}
 
 	if err := setupCgroup(); err != nil {
@@ -168,7 +179,13 @@ func child() error {
 	args := os.Args[4:]
 	runtime.LockOSThread()
 
-	// 0) 把根挂载设成"私有"。
+	// 0) 先加入宿主机预先建好的 netns（必须在 pivot_root 之前：
+	//    换根之后 /var/run/netns 就看不见了）
+	if err := joinNetns(); err != nil {
+		return err
+	}
+
+	// 1) 把根挂载设成"私有"。
 	//    新 mount namespace 会**继承父级的传播类型**（通常是 shared），
 	//    不设私有的话，容器里做的挂载可能传播回宿主机（在宿主机 mount 表里冒出来）。
 	//    真正解决泄漏的是这一行，而不是 Unshareflags。
