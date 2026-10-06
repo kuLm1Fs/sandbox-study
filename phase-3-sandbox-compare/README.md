@@ -35,7 +35,7 @@ qemu-system-x86_64 -M q35 -accel kvm -cpu host -smp 2 -m 2048 \
 
 ## 进度
 
-- [ ] Session 3-1｜KVM：起一台 ARM64 VM + 快照
+- [x] Session 3-1｜KVM：起一台 VM + 快照（WSL2/x86_64；起 VM 18 秒、快照恢复验证通过）
 - [ ] Session 3-2｜Firecracker：第一个 microVM
 - [ ] Session 3-3｜gVisor：runsc 跑容器
 - [ ] Session 3-4｜Kata：k3s 里跑 Kata pod
