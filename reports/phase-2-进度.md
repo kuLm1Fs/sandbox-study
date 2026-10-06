@@ -17,7 +17,7 @@
 | Session | 内容 | 状态 |
 |---|---|---|
 | 2-4 ⏳ | overlayfs | 亲手 `mount -t overlay`；对照 mini-oci `unpack.go` 的 whiteout/opaque |
-| 2-5 ⏳ | netns + veth + NAT | 两个 netns 互 ping，再 MASQUERADE 上外网 |
+| 2-5 🔄 | netns + veth + NAT 接进容器 | `impl/network.go`：宿主机侧建 netns/veth/路由/NAT（对应手敲步骤）；容器侧 `setns` 进预建 netns，替掉 `CLONE_NEWNET`（空盒子问题）；待 VPS 实机跑 `ping 8.8.8.8` 验证 |
 | 📦 v2.0 | 自制容器 v2.0 跑通 + README | 三层隔离各防什么写清楚 |
 
 ## 知识点掌握（`知识点.md` K2-1~K2-7）
