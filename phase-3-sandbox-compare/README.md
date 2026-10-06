@@ -36,7 +36,7 @@ qemu-system-x86_64 -M q35 -accel kvm -cpu host -smp 2 -m 2048 \
 ## 进度
 
 - [x] Session 3-1｜KVM：起一台 VM + 快照（WSL2/x86_64；起 VM 18 秒、快照恢复验证通过）
-- [ ] Session 3-2｜Firecracker：第一个 microVM
+- [x] Session 3-2｜Firecracker：第一个 microVM（WSL2/x86_64；microVM 点火成功，guest 内核 6.18.51+ ≠ 宿主 6.18.40.1-microsoft-standard-WSL2，tap0 172.16.0.1/30 + NAT 出网验证通过）
 - [ ] Session 3-3｜gVisor：runsc 跑容器
 - [ ] Session 3-4｜Kata：k3s 里跑 Kata pod
 - [ ] Session 3-5｜bench.go：三方案对比评测
@@ -222,7 +222,13 @@ ps aux | grep -v grep | grep firecracker   # 进程在
 # microVM 里：uname -r 与宿主机不同
 ```
 
-**常见坑**：（待实机补充）
+**实机记录**（2026-10-06，WSL2/x86_64，Firecracker v1.17.0）：
+
+- `uname -r`：guest `6.18.51+` vs 宿主 `6.18.40.1-microsoft-standard-WSL2`——两个内核，microVM 跑的是自己的内核。
+- 网络：宿主 `tap0` = `172.16.0.1/30`（UP），guest `eth0` = `172.16.0.2/30`（`boot_args` 里 `ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off` 配的）；guest 内 `ping 8.8.8.8` 0 丢包，宿主 NAT（`eth0` 出口 MASQUERADE）生效。
+- 配置：`machine-config` = 2 vCPU / 512 MiB；API 顺序 `boot-source` → `drives` → `network-interfaces` → `machine-config` → `actions`（`InstanceStart`）。
+
+**常见坑**：见 `mistakes/错题本.md` 第 6、7、8 条（`curl && echo OK` 不可信、v1.17 `drives` body 缺 `drive_id`、kernel 文件名别脑补）。
 
 **下一步**：→ Session 3-3（gVisor：不走硬件虚拟化的另一条路）
 
