@@ -38,7 +38,7 @@ qemu-system-x86_64 -M q35 -accel kvm -cpu host -smp 2 -m 2048 \
 - [x] Session 3-1｜KVM：起一台 VM + 快照（WSL2/x86_64；起 VM 18 秒、快照恢复验证通过）
 - [x] Session 3-2｜Firecracker：第一个 microVM（WSL2/x86_64；microVM 点火成功，guest 内核 6.18.51+ ≠ 宿主 6.18.40.1-microsoft-standard-WSL2，tap0 172.16.0.1/30 + NAT 出网验证通过）
 - [x] Session 3-3｜gVisor：runsc 跑容器（WSL2/x86_64；Docker 29.8.2 + runsc release-20260928.0，容器内 uname 看到 4.19.0-gvisor 假内核 + Starting gVisor，runc 对照看到宿主内核 6.18.40.1）
-- [ ] Session 3-4｜Kata：k3s 里跑 Kata pod
+- [x] Session 3-4｜Kata：k3s 里跑 Kata pod（WSL2/x86_64；k3s v1.36.5 + kata 4.2.0，kata pod 内 uname 看到 guest 内核 6.18.35，普通 pod 看到宿主内核）
 - [ ] Session 3-5｜bench.go：三方案对比评测
 - [ ] RESULTS.md 对比表 + 3 条结论
 
@@ -314,71 +314,89 @@ docker run --rm docker.m.daocloud.io/library/busybox:latest uname -r            
 
 ## Session 3-4｜Kata：k3s 里跑 Kata pod（35 分钟）
 
-**在哪做**：Linux VM（要 root，`/dev/kvm` 存在）
+**在哪做**：WSL2（`ssh PCGaming`；装 k3s 那一步要 sudo 密码，之后直连可跑）
 
-**目标**：k3s 单节点上跑起一个 `runtimeClassName: kata` 的 pod，`uname -r` 显示 guest 内核。
+**目标**：k3s 单节点上跑起一个 `runtimeClassName: kata-qemu-runtime-rs` 的 pod，`uname -r` 显示 guest 内核。
 
 **前置自检**：
 
 ```bash
 ls /dev/kvm && echo kvm-ok
-free -g | head -2   # 可用内存 ≥ 4G（k3s + kata 比较吃内存，不够就先跳过本节）
+free -g | head -2   # 可用内存 ≥ 4G
 ```
 
 **动手**：
 
-1. 装 k3s 单节点：
+1. 装 k3s 单节点（⚠️ k3s 自带的 kubectl 默认读 `/etc/rancher/k3s/k3s.yaml`，拷一份到 `~/.kube/config` 并 `export KUBECONFIG=~/.kube/config`）：
 
 ```bash
 curl -sfL https://get.k3s.io | sh -
-sudo kubectl get nodes   # 预期：STATUS Ready
+mkdir -p ~/.kube && sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config && sudo chown $(id -u):$(id -g) ~/.kube/config
+export KUBECONFIG=~/.kube/config
+kubectl get nodes   # 预期：STATUS Ready
 ```
 
-2. 装 kata-deploy：按 [Kata 官方 quick-start](https://github.com/kata-containers/kata-containers/blob/main/docs/quick-start-guide.md) 走（yaml 路径/版本以文档为准），装完检查：
+2. 装 helm（免 sudo），用 kata-deploy Helm chart 装 Kata（⚠️ Kata 4.x 的 RuntimeClass 改名了，没有叫 `kata` 的了；k3s 必须 `--set k8sDistribution=k3s`）：
 
 ```bash
-sudo kubectl get runtimeclass   # 预期：看到 kata
+mkdir -p ~/bin && cd /tmp && curl -fsSL https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz -o helm.tar.gz && tar xzf helm.tar.gz && install -m 0755 linux-amd64/helm ~/bin/helm
+export PATH=$HOME/bin:$PATH
+helm install kata-deploy "oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy" --version "4.2.0" --namespace kata-system --create-namespace --set k8sDistribution=k3s
+kubectl -n kata-system get pods   # 等 kata-deploy 装完（/opt/kata 落地，日志显示 installation completed successfully）
+kubectl get runtimeclass | grep kata-qemu-runtime-rs   # 预期：看到它
 ```
 
-3. 跑 Kata pod：
+3. 跑 Kata pod 和普通 pod 对照（pod 跑完即退出，用 `kubectl logs` 看输出；镜像用 quay.io，Docker Hub 直连不通）：
 
 ```bash
-cat > /tmp/pod-kata.yaml <<'EOF'
+cat > /tmp/kata-pods.yaml <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
   name: kata-demo
 spec:
-  runtimeClassName: kata
+  runtimeClassName: kata-qemu-runtime-rs
+  restartPolicy: Never
   containers:
   - name: c
-    image: busybox
-    command: ["sh", "-c", "sleep 3600"]
+    image: quay.io/libpod/ubuntu:latest
+    command: ["uname", "-r"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: runc-demo
+spec:
+  restartPolicy: Never
+  containers:
+  - name: c
+    image: quay.io/libpod/ubuntu:latest
+    command: ["uname", "-r"]
 EOF
-sudo kubectl apply -f /tmp/pod-kata.yaml
-sudo kubectl wait --for=condition=Ready pod/kata-demo --timeout=180s
-sudo kubectl exec kata-demo -- uname -r
+kubectl apply -f /tmp/kata-pods.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s pod/kata-demo
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s pod/runc-demo
+kubectl logs kata-demo   # 预期：guest 内核版本，和宿主机不一样
+kubectl logs runc-demo   # 预期：宿主机内核
 ```
 
-预期：`uname -r` 显示的是 **guest 内核**版本（和宿主机 `uname -r` 不一样）——pod 里跑的是一台轻量 VM。
-
-4. 对照：把 `runtimeClassName` 删掉再 apply 一个普通 pod，`uname -r` 显示宿主机内核。
-
-**刚才发生了什么**：RuntimeClass 是"给 Pod 选 runtime"的开关；`kata` 这个 runtime 背后是轻量 VM（QEMU + KVM），每个 pod 独占一个 guest 内核。K8s 调度完全不用改，只换 runtime。
+**刚才发生了什么**：RuntimeClass 是"给 Pod 选 runtime"的开关；`kata-qemu-runtime-rs` 这个 runtime 背后是轻量 VM（QEMU + KVM），每个 pod 独占一个 guest 内核。K8s 的调度、yaml 写法完全不用改，只换一行 `runtimeClassName`。
 
 **验证**：说出 Kata 和 gVisor 隔离方式的本质区别（一句话：Kata 是硬件虚拟化真内核，gVisor 是用户态假内核）。
 
 **自查清单**：
 
 ```bash
-sudo kubectl get runtimeclass
-sudo kubectl get pods
-sudo kubectl exec kata-demo -- uname -r
+kubectl get runtimeclass | grep kata
+kubectl logs kata-demo   # guest 内核
+kubectl logs runc-demo   # 宿主机内核
 ```
 
-**本节可暂缓**：k3s + kata 是 Phase 3 里最重的一节，拉镜像慢就先放放，**不阻塞 Session 3-5**。
+**实机记录**（2026-10-07 凌晨，WSL2/x86_64，k3s v1.36.5，kata 4.2.0）：
+- kata pod（`kata-qemu-runtime-rs`）：`uname -r` = `6.18.35`（guest 内核）
+- 普通 pod：`uname -r` = `6.18.40.1-microsoft-standard-WSL2`（宿主内核）
 
-**常见坑**：（待实机补充）
+**常见坑**：见 `mistakes/错题本.md` 第 11、12、13 条（老 kata-deploy.yaml 404、k3s 要 `--set k8sDistribution=k3s`、k3s kubectl 不认 `~/.kube/config`）。
 
 **下一步**：→ Session 3-5（bench.go：三方案对比评测）
 
