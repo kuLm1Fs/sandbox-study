@@ -37,7 +37,7 @@ qemu-system-x86_64 -M q35 -accel kvm -cpu host -smp 2 -m 2048 \
 
 - [x] Session 3-1｜KVM：起一台 VM + 快照（WSL2/x86_64；起 VM 18 秒、快照恢复验证通过）
 - [x] Session 3-2｜Firecracker：第一个 microVM（WSL2/x86_64；microVM 点火成功，guest 内核 6.18.51+ ≠ 宿主 6.18.40.1-microsoft-standard-WSL2，tap0 172.16.0.1/30 + NAT 出网验证通过）
-- [ ] Session 3-3｜gVisor：runsc 跑容器
+- [x] Session 3-3｜gVisor：runsc 跑容器（WSL2/x86_64；Docker 29.8.2 + runsc release-20260928.0，容器内 uname 看到 4.19.0-gvisor 假内核 + Starting gVisor，runc 对照看到宿主内核 6.18.40.1）
 - [ ] Session 3-4｜Kata：k3s 里跑 Kata pod
 - [ ] Session 3-5｜bench.go：三方案对比评测
 - [ ] RESULTS.md 对比表 + 3 条结论
@@ -236,54 +236,77 @@ ps aux | grep -v grep | grep firecracker   # 进程在
 
 ## Session 3-3｜gVisor：runsc 跑容器（30 分钟）
 
-**在哪做**：Linux VM（要 root；containerd 已在跑，见 Session 1-4）
+**在哪做**：WSL2（`ssh PCGaming`；装 docker 那一步要 sudo 密码，之后直连可跑）
 
-**目标**：用 `runsc` 跑起容器，进容器跑 `dmesg` 看到 gVisor 的启动日志。
+**目标**：用 `runsc` 跑起容器，容器里 `uname -r` 看到 gVisor 的假内核版本，`dmesg` 看到 gVisor 启动日志；对照 runc 看到宿主机内核。
 
 **前置自检**：
 
 ```bash
-sudo systemctl status containerd --no-pager | head -3   # active (running)
-uname -m   # aarch64（下对应架构的 runsc）
+docker --version   # 29.x
+runsc --version    # release-2026xxxx.x
+uname -m           # x86_64
 ```
 
 **动手**（安装步骤以 [gVisor 官方安装文档](https://gvisor.dev/docs/user_guide/install/) 为准，版本/源地址打开时核对）：
 
-1. 装 runsc（二进制或 apt 源，文档二选一），装完：
+1. 装 docker-ce（Docker 官方 apt 源）：
 
 ```bash
+sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+sudo usermod -aG docker kms   # 之后 docker 命令免 sudo（新登录生效）
+```
+
+2. 装 runsc（⚠️ `release/latest` 现在**只发 `gvisor.tar.bz2`**，单独下 `runsc` 二进制会 404）：
+
+```bash
+cd /tmp && curl -fsSL https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2 -o gvisor.tar.bz2 && curl -fsSL https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2.sha512 -o gvisor.tar.bz2.sha512 && sha512sum -c gvisor.tar.bz2.sha512
+mkdir -p gvisor && tar -xjf gvisor.tar.bz2 -C gvisor
+sudo install -m 0755 gvisor/runsc /usr/local/bin/runsc
+sudo install -m 0755 gvisor/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
+sudo cp -r gvisor/gvisor-bin /usr/local/bin/
+sudo /usr/local/bin/runsc install && sudo systemctl restart docker   # 注册 runsc 为 docker runtime
 runsc --version   # 预期：打印版本号
 ```
 
-2. 用 runsc 当 runtime 跑 busybox：
+3. 拉镜像、跑 gVisor 容器（⚠️ 这台机器直连 Docker Hub 会 EOF，改走 DaoCloud 镜像 `docker.m.daocloud.io`）：
 
 ```bash
-sudo ctr image pull docker.io/library/busybox:latest
-sudo ctr run --rm --runtime io.containerd.runsc.v1 docker.io/library/busybox:latest g1 /bin/sh -c "dmesg | head -5; uname -r"
+docker pull docker.m.daocloud.io/library/busybox:latest
+docker run --rm --runtime=runsc docker.m.daocloud.io/library/busybox:latest uname -r
+# 预期：4.19.0-gvisor（gVisor 的假内核，不是宿主机的）
+docker run --rm --runtime=runsc docker.m.daocloud.io/library/busybox:latest dmesg | head -3
+# 预期：[   0.000000] Starting gVisor...
 ```
 
-预期输出：dmesg 里看到 gVisor 的启动日志（`gVisor` 字样）；`uname -r` 显示的是 gVisor 假内核的版本，不是宿主机的。
-
-3. 对照 runc 跑同一个命令，感受区别：
+4. 对照 runc 跑同一个镜像：
 
 ```bash
-sudo ctr run --rm docker.io/library/busybox:latest r1 /bin/sh -c "uname -r"
+docker run --rm docker.m.daocloud.io/library/busybox:latest uname -r
+# 预期：宿主机内核 6.18.40.1-microsoft-standard-WSL2
 ```
 
-预期：这次显示的是**宿主机**内核版本。
-
-**刚才发生了什么**：runc 的容器和宿主机共享同一个内核（隔离靠 namespace + seccomp）；gVisor 在中间插了一个用户态内核（Sentry），容器的 syscall 先被它拦截处理，只有少数才透给宿主机。所以容器里 `uname` 看到的是假内核。
+**刚才发生了什么**：runc 的容器和宿主机共享同一个内核（隔离靠 namespace + seccomp）；gVisor 在中间插了一个用户态内核（Sentry），容器的 syscall 先被它拦截处理，只有少数才透给宿主机。所以容器里 `uname` 看到的是假内核（`4.19.0-gvisor`），`dmesg` 看到的是 Sentry 的启动日志（`Starting gVisor...` / `Feeding the init monster...`）。
 
 **验证**：一句话说出 gVisor 和 runc 隔离边界的区别（runc：共享宿主机内核；gVisor：用户态内核拦截 syscall）。
 
 **自查清单**：
 
 ```bash
-runsc --version
-sudo ctr run --rm --runtime io.containerd.runsc.v1 docker.io/library/busybox:latest g2 /bin/sh -c "uname -r"
+docker run --rm --runtime=runsc docker.m.daocloud.io/library/busybox:latest uname -r   # 4.19.0-gvisor
+docker run --rm docker.m.daocloud.io/library/busybox:latest uname -r                    # 宿主机内核
 ```
 
-**常见坑**：（待实机补充）
+**实机记录**（2026-10-06 深夜，WSL2/x86_64，Docker 29.8.2，runsc release-20260928.0）：
+- runsc：`uname -r` = `4.19.0-gvisor`；`dmesg` 首行 `[   0.000000] Starting gVisor...`
+- runc：`uname -r` = `6.18.40.1-microsoft-standard-WSL2`
+- 镜像走 `docker.m.daocloud.io`（Docker Hub 直连被 EOF，见错题本第 10 条）
+
+**常见坑**：见 `mistakes/错题本.md` 第 9、10 条（latest 不再单独发 runsc 二进制、Docker Hub 直连 EOF 改走镜像）。
 
 **下一步**：→ Session 3-4（Kata：K8s 里跑轻量 VM）
 
