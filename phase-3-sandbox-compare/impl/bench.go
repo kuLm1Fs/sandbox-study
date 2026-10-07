@@ -1,24 +1,25 @@
-// bench.go：三方案启动耗时对比（runc / runsc / firecracker）。
-// 用法：sudo go run bench.go <firecracker_ms>
-//   firecracker_ms：按讲义第 3 步手动测 5 次取中位数后填入。
-// runc/runsc 部分自动跑；firecracker 部分手动计时（API + 等 ssh 就绪不好自动化）。
+// bench.go：三方案启动耗时对比（runc / runsc / firecracker），经 docker 测。
+// 用法：go run bench.go [firecracker_ms]
+//   firecracker_ms：按讲义第 3 步手动测 5 次取中位数后填入（毫秒）。
+// runc/runsc 部分自动跑（docker --runtime=...，3-3 已验证）；
+// firecracker 部分手动计时（API + 等 ssh 就绪不好自动化）。
 //
-// 内存开销测的是"活着的容器"的 MemAvailable 差值：程序自动从 /tmp/bench/bundle
-// 复制出一份 bundle-mem，把 config.json 的 args 改成 sleep，起 detached 容器
-// 测完就删。不需要手动准备第二个 bundle。
+// 说明：经 docker 测的是"容器启动"耗时（含 docker 固定开销），
+// 三组用同一 harness，docker 开销对两组一样，对比倍率可信；
+// 绝对值比裸 runc 大，读数时注意。
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const image = "docker.m.daocloud.io/library/busybox:latest"
 
 func median(ds []float64) float64 {
 	sort.Float64s(ds)
@@ -38,10 +39,9 @@ func memAvailMB() float64 {
 }
 
 // timeCmd 跑外部命令，返回耗时毫秒；失败直接退出（计时就别吞错了）。
-func timeCmd(dir, name string, args ...string) float64 {
+func timeCmd(name string, args ...string) float64 {
 	t := time.Now()
 	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "命令失败 %s %v: %v\n%s\n", name, args, err, out)
 		os.Exit(1)
@@ -54,79 +54,41 @@ func quiet(name string, args ...string) {
 	_ = exec.Command(name, args...).Run()
 }
 
-// prepMemBundle 从 base 复制一份 bundle，把 config.json 的 process.args
-// 改成 sleep，让内存测试有个"活着"的容器可测。返回新 bundle 的路径。
-func prepMemBundle(base, dst string) string {
-	os.RemoveAll(dst)
-	if out, err := exec.Command("cp", "-r", base, dst).CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "复制 bundle 失败: %v\n%s\n", err, out)
-		os.Exit(1)
-	}
-	cfgPath := filepath.Join(dst, "config.json")
-	b, err := os.ReadFile(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "读 config.json 失败: %v\n", err)
-		os.Exit(1)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "解析 config.json 失败: %v\n", err)
-		os.Exit(1)
-	}
-	proc, ok := cfg["process"].(map[string]any)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "config.json 里没有 process 段\n")
-		os.Exit(1)
-	}
-	proc["args"] = []string{"/bin/sh", "-c", "sleep 1000000"}
-	out, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(cfgPath, out, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "写 config.json 失败: %v\n", err)
-		os.Exit(1)
-	}
-	return dst
-}
-
 func main() {
-	const bundle = "/tmp/bench/bundle"
 	fcMs := 0.0
 	if len(os.Args) > 1 {
 		fcMs, _ = strconv.ParseFloat(os.Args[1], 64)
 	}
 
-	// runc：前台 run 一个 exit 0 的容器，测 create+start+exit 全程，5 次取中位数。
-	// 测完 delete 掉 stopped 的容器，保持环境干净。
+	// runc / runsc：经 docker 各跑 5 次 /bin/true，测容器启动全程，取中位数。
 	runcTs := []float64{}
 	for i := 0; i < 5; i++ {
-		id := fmt.Sprintf("bench-%d", i)
-		runcTs = append(runcTs, timeCmd(bundle, "runc", "run", id))
-		quiet("runc", "delete", id)
+		runcTs = append(runcTs, timeCmd("docker", "run", "--rm", "--runtime=runc", image, "/bin/true"))
 	}
-
-	// runsc：经 ctr 跑 /bin/true，5 次取中位数（先 pull 好镜像）。
 	runscTs := []float64{}
 	for i := 0; i < 5; i++ {
-		id := fmt.Sprintf("gbench-%d", i)
-		runscTs = append(runscTs, timeCmd("", "ctr", "run", "--rm",
-			"--runtime", "io.containerd.runsc.v1",
-			"docker.io/library/busybox:latest", id, "/bin/true"))
+		runscTs = append(runscTs, timeCmd("docker", "run", "--rm", "--runtime=runsc", image, "/bin/true"))
 	}
 
-	// 内存开销：起一个 detached 的 sleep 容器（活着），看 MemAvailable 差值；
-	// 测完删掉。注意：不能拿 exit 0 的容器测——它退出后内存就被回收了，差值只是噪声。
-	memBundle := prepMemBundle(bundle, "/tmp/bench/bundle-mem")
+	// 内存开销：起一个活着的 sleep 容器，看 MemAvailable 差值；测完删掉。
+	// 注意：不能拿已退出的容器测——它退出后内存就被回收了，差值只是噪声。
 	m0 := memAvailMB()
-	timeCmd("", "runc", "run", "-d", "--bundle", memBundle, "bench-mem")
+	timeCmd("docker", "run", "-d", "--runtime=runc", "--name", "bench-mem", image, "sleep", "1000000")
+	time.Sleep(2 * time.Second) // 等容器进程稳定
 	m1 := memAvailMB()
-	quiet("runc", "delete", "--force", "bench-mem")
+	quiet("docker", "rm", "-f", "bench-mem")
 
-	fmt.Printf(`## 启动耗时（5 次中位数）
+	fcRow := "（按讲义第 3 步手动测 5 次取中位数后填入）"
+	if fcMs > 0 {
+		fcRow = fmt.Sprintf("%.0f ms", fcMs)
+	}
+	fmt.Printf(`## 启动耗时（5 次中位数，经 docker 测容器启动）
 
 | 方案 | 中位数 |
 |---|---|
 | runc | %.0f ms |
 | runsc (gVisor) | %.0f ms |
-| firecracker | %.0f ms（手动填入） |
+| firecracker | %s |
 
 ## 内存开销（单实例，MemAvailable 差值）
 
@@ -148,5 +110,5 @@ func main() {
 1. 启动速度：___ 最快（约 ___ms），适合 ___。
 2. 隔离强度：___ 最强（___），代价是 ___。
 3. Agent 沙盒选型：如果 ___ 选 ___，因为 ___。
-`, median(runcTs), median(runscTs), fcMs, m0-m1)
+`, median(runcTs), median(runscTs), fcRow, m0-m1)
 }

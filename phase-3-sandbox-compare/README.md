@@ -39,7 +39,7 @@ qemu-system-x86_64 -M q35 -accel kvm -cpu host -smp 2 -m 2048 \
 - [x] Session 3-2｜Firecracker：第一个 microVM（WSL2/x86_64；microVM 点火成功，guest 内核 6.18.51+ ≠ 宿主 6.18.40.1-microsoft-standard-WSL2，tap0 172.16.0.1/30 + NAT 出网验证通过）
 - [x] Session 3-3｜gVisor：runsc 跑容器（WSL2/x86_64；Docker 29.8.2 + runsc release-20260928.0，容器内 uname 看到 4.19.0-gvisor 假内核 + Starting gVisor，runc 对照看到宿主内核 6.18.40.1）
 - [x] Session 3-4｜Kata：k3s 里跑 Kata pod（WSL2/x86_64；k3s v1.36.5 + kata 4.2.0，kata pod 内 uname 看到 guest 内核 6.18.35，普通 pod 看到宿主内核）
-- [ ] Session 3-5｜bench.go：三方案对比评测
+- [x] Session 3-5｜bench.go：三方案对比评测（WSL2/x86_64；启动耗时中位数 runc 466ms / runsc 451ms / firecracker 1391ms，RESULTS.md + 3 条结论落盘）
 - [ ] RESULTS.md 对比表 + 3 条结论
 
 ---
@@ -402,184 +402,81 @@ kubectl logs runc-demo   # 宿主机内核
 
 ---
 
-## Session 3-5｜bench.go：三方案对比评测（40 分钟）
+## Session 3-5｜bench.go：三方案对比评测（40 分钟）✅ 2026-10-07 实机完成
 
-**在哪做**：Linux VM（要 root）
+**在哪做**：WSL2（3-2/3-3 的环境都在）
 
-**目标**：输出 `RESULTS.md`：三方案启动耗时中位数 + 内存开销 + 对比表 + 3 条结论。
+**目标**：输出 `RESULTS.md`：三方案启动耗时中位数 + 对比表 + 3 条结论。
 
-**前置自检**：
-
-```bash
-go version   # 预期：go1.22+
-ls ~/workspace/sandbox-study/phase-3-sandbox-compare/impl/
-```
-
-**动手**：
-
-1. 准备 runc 的 bundle（复用 Phase 1 的 rootfs，手写一个最小 config）：
+**第 1 步：建 tap0**——概念：tap0 是宿主侧的一块虚拟网卡，专门给
+Firecracker microVM 用的；宿主占 `172.16.0.1/30`，guest 用 `172.16.0.2/30`。
+benchmark 测的就是"从 `InstanceStart` 到能 ssh 上 `172.16.0.2`"的时间。
+`user kms` 让 kms 用户跑的 Firecracker 进程有权限用它。
 
 ```bash
-mkdir -p /tmp/bench/bundle/rootfs && cd /tmp/bench/bundle
-# 把你 Phase 1 的 rootfs（busybox 那棵）拷过来，或随便一个有 /bin/sh 的 rootfs
-runc spec   # 生成 config.json
-# 把 config.json 的 process.args 改成 ["/bin/sh", "-c", "exit 0"]，terminal 改 false
+sudo ip tuntap add tap0 mode tap user kms && \
+sudo ip addr add 172.16.0.1/30 dev tap0 && \
+sudo ip link set tap0 up && \
+ip addr show tap0 | grep 172.16.0.1
 ```
 
-2. 把下面的 `bench.go` 存进 `phase-3-sandbox-compare/impl/bench.go`：
+预期输出：`inet 172.16.0.1/30 scope global tap0`。
+四段拆解：建 tap 设备 → 配宿主 IP → 启用网卡 → 验证 IP 已配上。
 
-```go
-// bench.go：三方案启动耗时对比（runc / runsc / firecracker）。
-// 用法：sudo go run bench.go [firecracker_ms]
-// firecracker_ms：按第 3 步手动测 5 次取中位数后填入。
-// runc/runsc 部分自动跑；firecracker 部分手动计时（API + 等 ssh 就绪不好自动化）。
-package main
-
-import (
-	"fmt"
-	"os"
-	"os/exec"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
-)
-
-func median(ds []float64) float64 {
-	sort.Float64s(ds)
-	return ds[len(ds)/2]
-}
-
-func memAvailMB() float64 {
-	b, _ := os.ReadFile("/proc/meminfo")
-	for _, l := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(l, "MemAvailable:") {
-			f := strings.Fields(l)
-			kb, _ := strconv.ParseFloat(f[1], 64)
-			return kb / 1024
-		}
-	}
-	return 0
-}
-
-// timeCmd 跑外部命令，返回耗时毫秒；失败直接退出（计时就别吞错了）。
-func timeCmd(dir, name string, args ...string) float64 {
-	t := time.Now()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "命令失败 %s %v: %v\n%s\n", name, args, err, out)
-		os.Exit(1)
-	}
-	return float64(time.Since(t).Milliseconds())
-}
-
-func main() {
-	const bundle = "/tmp/bench/bundle"
-	fcMs := 0.0
-	if len(os.Args) > 1 {
-		fcMs, _ = strconv.ParseFloat(os.Args[1], 64)
-	}
-
-	// runc：前台 run 一个 exit 0 的容器，测 create+start+exit 全程，5 次取中位数。
-	runcTs := []float64{}
-	for i := 0; i < 5; i++ {
-		runcTs = append(runcTs, timeCmd(bundle, "runc", "run", fmt.Sprintf("bench-%d", i)))
-	}
-
-	// runsc：经 ctr 跑 /bin/true，5 次取中位数（先 pull 好镜像）。
-	runscTs := []float64{}
-	for i := 0; i < 5; i++ {
-		runscTs = append(runscTs, timeCmd("", "ctr", "run", "--rm",
-			"--runtime", "io.containerd.runsc.v1",
-			"docker.io/library/busybox:latest", fmt.Sprintf("gbench-%d", i), "/bin/true"))
-	}
-
-	// 内存开销：起 1 个 runc 容器，看 MemAvailable 差值（容器方案≈0，firecracker≈guest 内存）。
-	m0 := memAvailMB()
-	timeCmd(bundle, "runc", "run", "bench-mem")
-	m1 := memAvailMB()
-
-	fmt.Printf(`## 启动耗时（5 次中位数）
-
-| 方案 | 中位数 |
-|---|---|
-| runc | %.0f ms |
-| runsc (gVisor) | %.0f ms |
-| firecracker | %.0f ms（手动填入） |
-
-## 内存开销（单实例，MemAvailable 差值）
-
-| 方案 | 差值 |
-|---|---|
-| runc 起一个容器 | %.1f MB |
-| firecracker | ≈ guest 内存（512MB 配置 → 约 550MB，含 VMM 开销） |
-
-## 对比表
-
-| | 隔离边界 | 启动速度 | 内存开销 | 适用场景 |
-|---|---|---|---|---|
-| runc | 进程级（namespace+seccomp，共享内核） | 最快 | ≈0 | 普通容器 |
-| gVisor | syscall 拦截（用户态内核） | 中 | 小 | 不可信代码、多租户容器 |
-| firecracker | 硬件虚拟化（真内核） | 慢（百 ms 级） | 大（guest 内存） | 强隔离的 serverless/沙盒 |
-
-## 结论（按你的实测数据填）
-
-1. 启动速度：___ 最快（约 ___ms），适合 ___。
-2. 隔离强度：___ 最强（___），代价是 ___。
-3. Agent 沙盒选型：如果 ___ 选 ___，因为 ___。
-`, median(runcTs), median(runscTs), fcMs, m0-m1)
-}
-```
-
-3. 手动测 firecracker 启动 5 次（从 `InstanceStart` 到 ssh 就绪），取中位数：
+**第 2 步：测 runc / runsc**——概念：用同一个 Docker harness
+（`docker run --rm --runtime=...`）各起 5 次 `/bin/true`，取中位数。
+Docker 的固定开销对两组一样，所以相对关系可信；绝对值比裸 runc 大。
+（原讲义的裸 runc + ctr 路径实机走不通：WSL 的 containerd socket
+与 ctr 默认的不一致，`ctr plugins ls` 看不到 runsc，改走 3-3 已验证的
+docker 路径。详见 `impl/README.md`。）
 
 ```bash
-for i in 1 2 3 4 5; do
-  s=$(date +%s%N)
-  curl -s -X PUT --unix-socket /tmp/fc.socket http://localhost/actions \
-    --data '{"action_type": "InstanceStart"}'
-  until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=1 root@172.16.0.2 true 2>/dev/null; do sleep 0.2; done
-  e=$(date +%s%N); echo "第 $i 次：$(( (e-s)/1000000 ))ms"
-  # 停掉 microVM 再测下一次（按 getting-started 的关机方式）
-done
+cd /tmp/bench && go run bench.go
 ```
 
-（socket 路径和关机方式按你 3-2 的实际来；上面是模板。）
+实测（2026-10-07）：runc 466 ms，runsc 451 ms——基本同一水平，
+15 ms 差距是噪声，不能说谁更快。内存测法（MemAvailable 差值 -9.5 MB）
+出现负数，证明该测法噪声太大，本次不下结论。
 
-4. 跑 bench，输出 RESULTS.md：
+**第 3 步：测 firecracker**——概念：`fc-bench.sh` 循环 5 次，每次重启
+Firecracker 进程 → 配 boot source / rootfs / tap0 / 2 vCPU / 512 MiB →
+`InstanceStart` 开始计时 → 轮询 `ssh root@172.16.0.2 true` 直到就绪。
+测的是完整 microVM 冷启动：guest 内核启动 + userspace 初始化 + sshd。
 
 ```bash
-cd ~/workspace/sandbox-study/phase-3-sandbox-compare/impl
-sudo ctr image pull docker.io/library/busybox:latest   # runsc 计时要用
-sudo go run bench.go <firecracker中位数> > ../RESULTS.md
-cat ../RESULTS.md
+cd /tmp/bench && bash fc-bench.sh
 ```
 
-预期：`RESULTS.md` 里有三组数字 + 对比表。3 条结论按你的实测数据填完。
+实测（2026-10-07）：1449 / 1346 / 1391 / 1384 / 1395 ms，
+中位数 **1391 ms**，约是容器启动的 3 倍。
 
-**刚才发生了什么**：runc/runsc 的计时是"调外部命令看墙钟"，简单可靠；firecracker 的启动涉及 API + guest 内核 + ssh 三段，不好自动化，手动 5 次取中位数更诚实。内存开销读 `/proc/meminfo` 的 `MemAvailable` 差值——容器方案这个数≈0（共享内核），这本身就是一条结论。
-
-**验证**：说出"为什么 firecracker 不自动化计时"（三段式启动，ssh 就绪的判定条件不稳定，手动更诚实）。
-
-**自查清单**：
+**第 4 步：组装 RESULTS.md**——把三组中位数 + 对比表 + 3 条结论落盘：
 
 ```bash
-ls -lh ../RESULTS.md   # 非空
-grep -c "ms" ../RESULTS.md
+cd ~/workspace/sandbox-study/phase-3-sandbox-compare/impl && \
+go run bench.go 1391 > ../RESULTS.md && cat ../RESULTS.md
 ```
 
-**常见坑**：（待实机补充）
+**3 条结论**（按实测数据）：
 
-**下一步**：→ 📦 项目收尾（RESULTS.md 定稿）→ Phase 4
+1. runc（466 ms）与 runsc（451 ms）基本同一水平，15 ms 差距是噪声；
+   gVisor 用户态内核的启动开销被 Docker harness 固定开销掩盖了。
+2. Firecracker 冷启动中位数 1391 ms，约 3x——多出来的是 guest 内核
+   启动 + userspace + sshd，这是真虚拟机隔离的本质代价。
+3. 内存开销本次无可信数字（MemAvailable 差值 -9.5 MB 为负），
+   需要 cgroup memory peak 这类精细工具，留作后续。
 
+**验证**：说出"为什么 firecracker 比容器慢约 3 倍"
+（guest 内核要完整启动一次，容器共享宿主内核；
+runsc 的"内核"是用户态进程，启动快）。
+
+**常见坑**：本次实机未踩新坑；3-5 的路径改写（ctr→docker）见 `impl/README.md`。
 ---
 
 ## 📦 项目：sandbox-compare
 
 `impl/bench.go` + `RESULTS.md`（对比表 + 3 条结论）+ 本 README 即项目文档。
-
-**注意**：`bench.go` 的正文在 Session 3-5 第 2 步，跑通后把文件也提交到 `impl/`。
+`bench.go` 已在 `impl/` 落盘（含实机改写说明）。
 
 ## Phase 3 出口验收
 

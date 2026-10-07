@@ -14,16 +14,21 @@
 
 ```bash
 cd phase-3-sandbox-compare/impl
-sudo go run bench.go <firecracker中位数> > ../RESULTS.md
+go run bench.go <firecracker中位数> > ../RESULTS.md
 ```
 
 `firecracker中位数`：按讲义 Session 3-5 第 3 步手动测 5 次（`InstanceStart` → ssh 就绪）取中位数后填入。
-runc/runsc 部分自动跑；bench.go 会自己从 `/tmp/bench/bundle` 复制出一份
-`bundle-mem`（args 改成 sleep）来测"活着的容器"的内存差值，不用手动准备第二个 bundle。
+runc/runsc 部分自动跑（经 `docker --runtime=...`，3-3 已验证；不用 sudo）。
 
 ## 依赖
 
 - WSL2 / x86_64（`/dev/kvm` 可用，3-2 已验证）
-- `runc`、`runsc`（经 containerd `ctr` 调用）、Firecracker 二进制（x86_64）
-- 开工前先确认 `ctr` 的 `io.containerd.runsc.v1` runtime 可用；若不可用，改用
-  3-3 已验证的 `docker --runtime=runsc` 路径（见讲义）
+- Docker（`runc`、`runsc` 两个 runtime 均已注册，3-3 已验证）+ Firecracker 二进制（x86_64）
+- 镜像 `docker.m.daocloud.io/library/busybox:latest` 已 pull（Docker Hub 直连不通，走 daocloud）
+
+## 实机改写说明（2026-10-07）
+
+原讲义是裸 `runc` + `ctr` 路径。实机发现 WSL 的 containerd socket 与 `ctr`
+默认的不一致，`ctr plugins ls` 看不到 runsc；改走 3-3 已验证的
+`docker --runtime=runc|runsc`。同一 harness 下 docker 的固定开销对两组一样，
+对比倍率可信；绝对值比裸 runc 大，读 RESULTS.md 时注意。
