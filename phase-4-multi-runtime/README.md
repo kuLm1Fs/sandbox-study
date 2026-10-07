@@ -19,5 +19,6 @@
 
 ## 进度
 
-- [ ] Session 4-1 ~ 4-6（见 docs/学习路线.md）
+- [x] Session 4-1 ~ 4-4（2026-10-07 实机完成，精华问答见 notes/学习笔记.md）
+- [ ] Session 4-5 ~ 4-6（见 docs/学习路线.md）
 - [ ] 多 runtime 集群跑通
