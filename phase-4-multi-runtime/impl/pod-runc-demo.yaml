@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: runc-demo
+spec:
+  containers:
+  - name: c
+    image: docker.m.daocloud.io/library/busybox:latest
+    command: ["sleep", "3600"]
