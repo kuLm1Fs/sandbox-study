@@ -37,8 +37,11 @@ func NewFirecrackerRuntime() *FirecrackerRuntime {
 }
 
 // api 用 curl 调 firecracker 的 unix socket API（跟 fc-bench.sh 一样）。
+// -f：HTTP 出错（4xx/5xx）时 curl 直接返回非零退出码。
+// 教训：W3 实机时配网卡那步被拒绝了，但没加 -f，程序当成功继续跑，
+// 傻等 ssh 60 秒才超时。以后 API 调用必须看 HTTP 状态，不只看 curl 退出码。
 func (f *FirecrackerRuntime) api(method, path, json string) error {
-	args := []string{"-s", "-X", method, "--unix-socket", f.Sock, "http://localhost" + path}
+	args := []string{"-sf", "-X", method, "--unix-socket", f.Sock, "http://localhost" + path}
 	if json != "" {
 		args = append(args, "--data", json)
 	}
@@ -70,9 +73,15 @@ func (f *FirecrackerRuntime) Create(id, image string) error {
 	if err := f.waitSock(5 * time.Second); err != nil {
 		return err
 	}
-	// 配 boot source / rootfs / 网络 / 机器：跟 fc-bench.sh 的四步一样
+	// 配 boot source / rootfs / 网络 / 机器：跟 fc-bench.sh 的四步一样。
+	// 注意 boot_args 里的 ip=：客户机 eth0 的地址不是 DHCP 来的，
+	// 是内核启动参数直接配的（格式 ip=客户机::网关:掩码::网卡:off）。
+	// 教训：W3 实机发现这里漏了 ip=，客户机启动后 eth0 没有地址，
+	// ARP 零回应、ssh 超时。W2 那次"跑通"是假阳性——ssh 连上的很可能是
+	// 3-5 残留的老 VM（它的 boot_args 是对的），不是我们新起的。
+	// 重启清掉残留进程后真相暴露。3-5 README 第 228 行有原文为证。
 	if err := f.api("PUT", "/boot-source", fmt.Sprintf(
-		`{"kernel_image_path":%q,"boot_args":"console=ttyS0 reboot=k panic=1 pci=off"}`, f.Kernel)); err != nil {
+		`{"kernel_image_path":%q,"boot_args":"console=ttyS0 reboot=k panic=1 pci=off ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off"}`, f.Kernel)); err != nil {
 		return err
 	}
 	if err := f.api("PUT", "/drives/rootfs", fmt.Sprintf(
@@ -118,4 +127,13 @@ func (f *FirecrackerRuntime) Destroy(id string) error {
 	_ = f.Stop(id)
 	os.Remove(f.Sock)
 	return nil
+}
+
+func (f *FirecrackerRuntime) Exec(id string, cmd ...string) (string, error) {
+	_ = id
+	args := append([]string{"-i", f.Key, "-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=2",
+		"root@"+f.IP}, cmd...)
+	out, err := exec.Command("ssh", args...).CombinedOutput()
+	return string(out), err
 }

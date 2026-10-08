@@ -35,3 +35,9 @@ func (r *RuncRuntime) Stop(id string) error {
 func (r *RuncRuntime) Destroy(id string) error {
 	return exec.Command("docker", "rm", "-f", id).Run()
 }
+
+func (r *RuncRuntime) Exec(id string, cmd ...string) (string, error) {
+	args := append([]string{"exec", id}, cmd...)
+	out, err := exec.Command("docker", args...).CombinedOutput()
+	return string(out), err
+}
