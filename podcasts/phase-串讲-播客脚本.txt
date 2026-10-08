@@ -1,0 +1,30 @@
+老陈: 欢迎回到沙盒学习电台，我是老陈。
+小林: 我是小林。今天这期不一样，不复盘某一个阶段，我们把第一阶段到第五阶段全部串起来，画一条线。
+老陈: 这条线就是：隔离这件事，是怎么从关住一个进程，一路做到给整个集群分房，最后变成一个平台的。
+小林: 第一阶段，mini-oci，手搓 OCI 镜像。镜像就是一串 tar 层加 manifest，文件名即 digest，内容寻址，改一层只多一层。
+老陈: 还有 runc 的分工：父进程负责接线配资源，子进程只负责进去、换根、执行。pull、unpack、run，三个子命令就是镜像的一辈子。
+小林: 第二阶段，三层笼子。cgroup 管资源，seccomp 管系统调用，netns 加 veth 加 NAT 管网络，外加 overlay。
+老陈: 一句话：Linux 的 namespace 决定进程看得见什么，cgroup 决定它用得了多少。记住这句，后面 K 八 S 的 namespace 跟它是两码事，别混。
+小林: 第三阶段，虚拟化。核心问题是：共享内核这条边界不够用的时候，往哪退？
+老陈: 一条光谱。runc 共享内核，最快；gVisor，在用户态跑一个 Go 写的假内核，容器里 uname 看到四点一九点零杠 gvisor；Firecracker 和 Kata，真内核加硬件虚拟化，kata 的 pod 里看到六点一八点三五的客户机内核，跟宿主机完全两个内核。
+小林: benchmark 给了数字：runc 四百六十六毫秒，runsc 四百五十一毫秒，基本同一水平；Firecracker 一千三百九十一毫秒，慢三倍。多出来的就是 guest 内核启动加用户空间加 sshd。隔离强度和启动代价的 trade-off，第一次有了实测数字。
+老陈: 还有个教训：内存那次 MemAvailable 差出负数，证明粗测法噪声太大。这次我们没硬编结论，不下结论也是一种结论。
+小林: 第四阶段，K 八 S，这期多花点时间。先把三个词掰开：集群、节点、命名空间。
+老陈: 集群 cluster，就是被同一个 apiserver 管起来的多台机器。节点 node，是集群里的一台机器，每台上都有个 kubelet，节点的管家。
+小林: 命名空间 namespace，最容易跟第二阶段搞混。Linux 的 namespace 是内核隔离原语；K 八 S 的 namespace 是集群里的逻辑分组，比如 default 和 kube-system，做配额和权限划分。名字一样，完全两码事。
+老陈: 调用链，从 kubectl apply 到容器跑起来：先变成 API 调用打到 apiserver，证书认证，再看 subject 里的组给授权，状态写进 etcd 这个账本。k3s 单节点里账本是 sqlite 套了个 kine 的壳，但 apiserver 感觉不出来，这就是唯一出入口的好处，存储层随便换。
+小林: 然后 deployment 控制器建 replicaset，replicaset 控制器建 pod，这时 pod 的 nodeName 还是空的。scheduler 来分房：过滤，哪些节点住得下，看 requests；打分，住哪最合适；最后 bind，把 nodeName 写回去。
+老陈: 我们亲手验证过：要一百 G 内存的 pod，scheduler 判 FailedScheduling，零比一节点可用，内存不足。requests 管调度，实锤。
+小林: 分完房，该节点的 kubelet 才认领。注意是认领不是派活：kubelet 只 watch 写着自己节点名的 pod，apiserver 从不主动派活。
+老陈: kubelet 调 CRI 到 containerd 再到 runc 起容器，CNI 插件链配网络：flannel 管跨节点，bridge 建网桥，host-local 这个 IPAM 从网段分 IP。我们看到 pod 的网桥叫 cni0，地址十点四二点零点一，pod 从点二开始往后分。
+小林: controller-manager 是调谐循环，不管放哪，只管数数：期望五个实际三个就补两个，删 deployment 就级联全删，一个不留。
+老陈: 最后是 RuntimeClass，runtime 的菜单。pod 的 sandbox 是个坑位，runc、gVisor、Kata 是填坑的材料，pod 里写一句用哪个 runtime 就是点菜。
+小林: 还有个实战教训：菜单上有三十多道菜，但 containerd 后厨只认 config 点 toml 里的 runtimes，kata 的那段额外配置这版 k3s 没吃进去。我们亲手给后厨加了 runsc：config 存成模板加一段，重启 k3s，建 RuntimeClass，上菜验证，pod 里 uname 看到四点一九点零杠 gvisor。
+老陈: 同一集群里，runc 的 pod 看到宿主内核，gvisor 的 pod 看到假内核，同框。这就是虚机和容器统一编排的缩小版。
+小林: 第五阶段，mini-sandbox，把前面全部变成代码。核心是一个 Runtime 接口，create、start、stop、destroy 四个方法，上层只认合同。
+老陈: runc 后端是借 docker 之手调的，注释里诚实写了调用链：程序到 docker 到 dockerd 到 containerd 再到 runc。firecracker 后端复刻了 benchmark 脚本。main 里换后端只改一行，底下就从容器变成真虚拟机。
+小林: 还有 interface 的核心收获：Go 里没有 implements，方法齐了编译器就认。那行 var 下划线 Runtime 就是编译期检查。
+老陈: 一条线收束：第一阶段学会镜像是啥，第二阶段学会怎么关住进程，第三阶段量出隔离的代价，第四阶段学会给集群分房，第五阶段把这一切变成平台接口。
+小林: sandbox 的本质就一句话：隔离强度和启动代价的 trade-off，剩下的都是工程。
+老陈: 我是老陈。
+小林: 我是小林，下期见。
