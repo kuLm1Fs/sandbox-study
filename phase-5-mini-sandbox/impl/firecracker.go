@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -37,11 +38,14 @@ func NewFirecrackerRuntime() *FirecrackerRuntime {
 }
 
 // api 用 curl 调 firecracker 的 unix socket API（跟 fc-bench.sh 一样）。
-// -f：HTTP 出错（4xx/5xx）时 curl 直接返回非零退出码。
-// 教训：W3 实机时配网卡那步被拒绝了，但没加 -f，程序当成功继续跑，
-// 傻等 ssh 60 秒才超时。以后 API 调用必须看 HTTP 状态，不只看 curl 退出码。
+// --fail-with-body：HTTP 出错（4xx/5xx）时 curl 返回非零退出码，但 body 留下来，
+// 排错时能看到 fault_message。
+// 教训两则：
+// ① W3 实机时配网卡那步被拒绝了，但没加 -f，程序当成功继续跑，傻等 ssh 60 秒才超时。
+// ② W4 实机发现 -f 会在 HTTP 报错时吞掉 body，snapshot/create 被 400 拒绝却看不到原因，
+//    只能手动 curl 裸调才看到 fault_message。以后 API 调用既要看 HTTP 状态，也要留 body。
 func (f *FirecrackerRuntime) api(method, path, json string) error {
-	args := []string{"-sf", "-X", method, "--unix-socket", f.Sock, "http://localhost" + path}
+	args := []string{"-s", "--fail-with-body", "-X", method, "--unix-socket", f.Sock, "http://localhost" + path}
 	if json != "" {
 		args = append(args, "--data", json)
 	}
@@ -101,7 +105,12 @@ func (f *FirecrackerRuntime) Start(id string) error {
 	if err := f.api("PUT", "/actions", `{"action_type":"InstanceStart"}`); err != nil {
 		return err
 	}
-	// 轮询 ssh 直到就绪：跟 fc-bench.sh 的 until 循环一样，60 秒超时
+	return f.waitSSH()
+}
+
+// waitSSH 轮询 ssh 直到客户机就绪：跟 fc-bench.sh 的 until 循环一样，60 秒超时。
+// Start 和 Restore 都要等，所以抽出来复用。
+func (f *FirecrackerRuntime) waitSSH() error {
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		err := exec.Command("ssh", "-i", f.Key, "-o", "BatchMode=yes",
@@ -131,9 +140,17 @@ func (f *FirecrackerRuntime) Destroy(id string) error {
 
 func (f *FirecrackerRuntime) Exec(id string, cmd ...string) (string, error) {
 	_ = id
+	// ssh 会把参数用空格拼成一行丢给远端 shell，所以每个参数必须加单引号，
+	// 否则带空格的参数（如 "sleep 300"）会被拆开，pgrep 直接报语法错误。
+	// 注意：docker exec 是直接 exec 不经过 shell，引号只加在这边——
+	// 同一个 Exec 接口，两个后端对参数的语义不一样，实现里各自处理。
+	quoted := make([]string, len(cmd))
+	for i, c := range cmd {
+		quoted[i] = "'" + strings.ReplaceAll(c, "'", "'\\''") + "'"
+	}
 	args := append([]string{"-i", f.Key, "-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=2",
-		"root@"+f.IP}, cmd...)
+		"root@" + f.IP}, strings.Join(quoted, " "))
 	out, err := exec.Command("ssh", args...).CombinedOutput()
 	return string(out), err
 }
